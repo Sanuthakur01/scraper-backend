@@ -1,0 +1,11 @@
+node_modules/
+# The dashboard (frontend) is its own repository, Sanuthakur01/scraper-frontend, cloned into client/.
+client/
+*.tsbuildinfo
+.env
+*.log
+# Naukri feed files and collection logs
+data/
+# The Naukri scraper is its own git repository, and its chrome_profile folders hold browser
+# logins. Never commit it here.
+naukri-scraper/

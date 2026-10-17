@@ -1,0 +1,24 @@
+{
+  "name": "server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "collect": "node scripts/collect.js",
+    "reclassify": "node scripts/reclassify.js",
+    "refresh-skills": "node scripts/refresh-skills.js",
+    "replay": "node scripts/replay.js",
+    "dedupe": "node scripts/dedupe.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "apify-client": "^2.25.0",
+    "express": "^5.3.0",
+    "mongoose": "^9.11.2"
+  },
+  "devDependencies": {
+    "mongodb-memory-server-core": "^11.3.0"
+  }
+}

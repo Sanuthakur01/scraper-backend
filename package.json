@@ -1,0 +1,25 @@
+{
+  "name": "job-dashboard",
+  "private": true,
+  "description": "Daily India job tracker for Data Analyst, Data Science, Data Engineering and Production Support roles",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "build": "npm run build -w client",
+    "start": "npm start -w server",
+    "collect": "npm run collect -w server --",
+    "reclassify": "npm run reclassify -w server --",
+    "refresh-skills": "npm run refresh-skills -w server --",
+    "replay": "npm run replay -w server --",
+    "dedupe": "npm run dedupe -w server --",
+    "demo": "npm run demo -w server --",
+    "test": "npm test -w server"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

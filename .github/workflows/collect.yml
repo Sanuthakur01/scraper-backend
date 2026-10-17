@@ -1,0 +1,27 @@
+name: LinkedIn-only collection (manual)
+
+# The daily collection runs on a Windows PC (collect-daily.cmd + Task Scheduler), because the Naukri
+# scraper needs a visible Chrome window (Naukri answers hidden browsers with HTTP 403), which GitHub's
+# servers don't have, and bot protection like Naukri's usually blocks cloud servers too. This workflow is a manual
+# fallback that collects LinkedIn only (Apify), e.g. when that PC is off. Use the "Run workflow"
+# button on the Actions tab. To run it daily as well, add:  schedule: [{cron: '30 1 * * *'}]
+on:
+  workflow_dispatch:
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --workspace server
+      - run: npm run collect
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_LIMIT_PER_SEARCH: ${{ vars.APIFY_LIMIT_PER_SEARCH }}
+          DISABLED_SOURCES: Naukri,Indeed,Glassdoor
