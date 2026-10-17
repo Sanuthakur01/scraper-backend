@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { MongoMemoryServer } from 'mongodb-memory-server-core';
+import { config } from '../src/config.js';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
 import { CollectorRun, Job } from '../src/models.js';
@@ -278,4 +279,34 @@ test('hiring partners: employers with 2+ openings, their HR contacts and placeme
   const csv = await (await fetch(`${base}/partners.csv`)).text();
   assert.match(csv.split('\r\n')[0], /^\uFEFF?Company,Openings,Data Analyst,/);
   assert.match(csv, /Acme Analytics,2,2,0,0,0,Pune,\d{4}-\d\d-\d\d,91234 00001,hr@acme.in; careers@acme.in,1,1/);
+});
+
+test('a dashboard hosted elsewhere can use the API only if its address is in CORS_ORIGINS', async () => {
+  const dashboard = 'https://dash.example.com';
+  const plain = await fetch(`${base}/meta`, { headers: { Origin: dashboard } });
+  assert.equal(plain.headers.get('access-control-allow-origin'), null, 'not allowed unless configured');
+
+  const saved = config.corsOrigins;
+  config.corsOrigins = [dashboard];
+  const server2 = createApp().listen(0);
+  try {
+    const api = `http://localhost:${server2.address().port}/api`;
+    const preflight = await fetch(`${api}/jobs/0123456789abcdef01234567/follow-up`, {
+      method: 'OPTIONS',
+      headers: { Origin: dashboard, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'content-type' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), dashboard);
+    assert.match(preflight.headers.get('access-control-allow-methods'), /PUT/);
+    assert.match(preflight.headers.get('access-control-allow-headers'), /Content-Type/i);
+
+    const read = await fetch(`${api}/meta`, { headers: { Origin: dashboard } });
+    assert.equal(read.status, 200);
+    assert.equal(read.headers.get('access-control-allow-origin'), dashboard);
+    const stranger = await fetch(`${api}/meta`, { headers: { Origin: 'https://someone-else.example' } });
+    assert.equal(stranger.headers.get('access-control-allow-origin'), null, 'other sites are not allowed');
+  } finally {
+    server2.close();
+    config.corsOrigins = saved;
+  }
 });

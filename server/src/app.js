@@ -19,9 +19,30 @@ function basicAuth(password) {
   };
 }
 
+// A dashboard hosted on another address (its NEXT_PUBLIC_API_URL points here) may only read this API if
+// the API names that address: CORS_ORIGINS. Answers the browser's preflight check for saving (PUT) too.
+function allowOrigins(origins) {
+  return (req, res, next) => {
+    res.vary('Origin');
+    const origin = req.headers.origin;
+    if (!origin || !origins.includes(origin)) return next();
+    res.set('Access-Control-Allow-Origin', origin);
+    if (req.method !== 'OPTIONS') return next();
+    res.set({
+      'Access-Control-Allow-Methods': 'GET, PUT',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '600',
+    });
+    res.status(204).end();
+  };
+}
+
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
+
+  // Before the login check, which a browser's preflight request can't pass.
+  if (config.corsOrigins.length) app.use('/api', allowOrigins(config.corsOrigins));
 
   // Before the login check so the host's health checks work.
   app.get('/api/health', (req, res) => res.json({ ok: true }));

@@ -105,6 +105,7 @@ You don't need any accounts for this. It runs everything with fake data in a tem
 
 ```
 npm install
+npm install --prefix client
 npm run build
 npm run demo
 ```
@@ -122,7 +123,8 @@ git clone https://github.com/Sanuthakur01/scraper-backend.git ijf
 cd ijf
 git clone https://github.com/Sanuthakur01/scraper-frontend.git client     # the dashboard
 git clone https://github.com/Hyperion101010/naukri-scraper.git            # the Python scraper (Naukri, Indeed, Glassdoor)
-npm install
+npm install                     # the backend's packages
+npm install --prefix client     # the dashboard's packages (its own project, with its own lock file)
 ```
 
 Then copy `.env.example` to `.env` (or `server/.env`) and fill it in. The backend alone (without `client`) can still collect and serve the API; `npm run build` needs `client`.
@@ -160,6 +162,7 @@ Sessions are saved in `indeed_profile` and `chrome_profile`. These folders hold 
 ```
 copy .env.example .env        (then fill in APIFY_TOKEN and MONGODB_URI; server\.env also works)
 npm install
+npm install --prefix client
 npm run collect               (all four platforms, 9 searches each; about 7 minutes; three Chrome windows open)
 npm run build
 npm start                     (open http://localhost:3000)
@@ -181,16 +184,24 @@ Each day's output is written to `data\logs\collect-YYYY-MM-DD.log`. The dashboar
 
 If that PC is off, collect LinkedIn alone from GitHub. Push this folder to a **private** GitHub repo; the `naukri-scraper` folder is excluded. Add the `MONGODB_URI` and `APIFY_TOKEN` secrets. Then use Actions → "LinkedIn-only collection (manual)" → **Run workflow**.
 
-### 5. Put the dashboard online (Render)
+### 5. Put the dashboard online
 
-Render → New → Web Service → connect the repo, then:
+Collection keeps running on the Windows PC (step 4). Online you host the API and the dashboard, in one of two ways.
 
-- Build command: `npm ci && npm run build`
+**A. One service on Render (simplest; the dashboard password works).** Render → New → Web Service → connect `scraper-backend`, then:
+
+- Build command: `npm ci && git clone --depth 1 https://github.com/Sanuthakur01/scraper-frontend.git client && npm ci --prefix client && npm run build`
 - Start command: `npm start`
 - Environment: `MONGODB_URI`, and `DASHBOARD_PASSWORD` to require a login (any username, this password)
 - Health check path: `/api/health`
 
-The free plan sleeps after 15 minutes idle, so the first page load then takes 30-60 seconds. The $7/month Starter plan stays on.
+**B. Dashboard and API hosted apart** (e.g. dashboard on Vercel, API on Render):
+
+- API (Railway or Render, `scraper-backend`): the defaults work: `npm ci`, then `npm run build` (nothing to build without the dashboard), then `npm start`. Health check `/api/health`. Variables: `MONGODB_URI` (the same as in your `.env`), and `CORS_ORIGINS` = the dashboard's address (e.g. `https://ijf-jobs.vercel.app`). No `APIFY_TOKEN` is needed there: collection runs on the Windows PC.
+- Dashboard (Vercel, `scraper-frontend`): environment `NEXT_PUBLIC_API_URL` = the API's address (e.g. `https://scraper-backend.onrender.com`). See that repo's `.env.example`.
+- `DASHBOARD_PASSWORD` doesn't apply here: protect the dashboard with the host's own access settings.
+
+Render's free plan sleeps after 15 minutes idle, so the first page load then takes 30-60 seconds. The $7/month Starter plan stays on.
 
 ## Cost
 
@@ -251,7 +262,7 @@ The dashboard header shows how many searches failed in the last run. Hover over 
 |---|---|
 | `npm run collect` | The whole pipeline: LinkedIn (Apify) + Naukri, Indeed and Glassdoor (scraper) → database. Needs `APIFY_TOKEN`, `MONGODB_URI`, and the scraper setup |
 | `npm start` | Start the dashboard server (serves the built dashboard from `client/out`) |
-| `npm run build` | Build the Next.js dashboard to static files |
+| `npm run build` | Build the Next.js dashboard (in `client/`) to static files. Needs `npm install --prefix client` once |
 | `npm run typecheck -w client` | Type-check the dashboard |
 | `npm run demo` | Dashboard with fake data, no accounts needed |
 | `npm run reclassify` | Apply changed course rules, excluded companies or experience range to stored jobs (add `-- --dry-run` to preview) |

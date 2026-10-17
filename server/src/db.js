@@ -14,7 +14,11 @@ const hasDatabaseName = (uri) => {
 };
 
 export async function connectDb(uri = config.mongoUri) {
-  if (!uri) throw new Error('MONGODB_URI is not set. Copy .env.example to .env and fill it in.');
+  if (!uri) {
+    throw new Error(
+      'MONGODB_URI is not set. On this PC: copy .env.example to .env and fill it in. On a host (Railway, Render): add it to the service\'s environment variables.',
+    );
+  }
   const options = {
     serverSelectionTimeoutMS: 15_000,
     ...(hasDatabaseName(uri) ? {} : { dbName: 'jobdashboard' }),

@@ -49,6 +49,11 @@ export const config = {
   // is lost if saving fails; `npm run replay` loads them again. Kept 14 days.
   rawDir: path.join(rootDir, 'data', 'raw'),
   dashboardPassword: process.env.DASHBOARD_PASSWORD ?? '',
+  // Addresses of dashboards hosted elsewhere that may use this API (e.g. https://jobs.vercel.app).
+  corsOrigins: (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/+$/, ''))
+    .filter(Boolean),
   scheduleLabel: process.env.SCHEDULE_LABEL || 'Updated daily at 07:00 IST',
   brandName: process.env.BRAND_NAME || 'IJF', // on the weekly report image and WhatsApp text
   demo: process.env.DEMO_MODE === '1',

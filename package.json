@@ -3,13 +3,12 @@
   "private": true,
   "description": "Daily India job tracker for Data Analyst, Data Science, Data Engineering and Production Support roles",
   "workspaces": [
-    "server",
-    "client"
+    "server"
   ],
   "scripts": {
     "dev:server": "npm run dev -w server",
-    "dev:client": "npm run dev -w client",
-    "build": "npm run build -w client",
+    "dev:client": "npm --prefix client run dev",
+    "build": "node server/scripts/build-dashboard.js",
     "start": "npm start -w server",
     "collect": "npm run collect -w server --",
     "reclassify": "npm run reclassify -w server --",
