@@ -13,30 +13,17 @@ const dryRun = process.argv.includes('--dry-run');
 
 // HR details typed in on both copies: each field keeps the kept copy's value, or else the other's;
 // different remarks are both kept.
-// Placement: a placement on either copy is never lost (the larger count, the earlier date); otherwise
-// the status changed most recently wins. Students from both are kept.
 function mergeManual(keep, other) {
   if (!other) return keep;
   if (!keep) return other;
   const remarks = [keep.remarks, other.remarks].filter(Boolean);
-  const students = [keep.students, other.students].flatMap((s) => String(s ?? '').split(/\s*,\s*/)).filter(Boolean);
-  const placed = [keep, other].filter((m) => m.status === 'placed');
-  const latest = [keep, other].filter((m) => m.status).sort((a, b) => (b.statusAt ?? 0) - (a.statusAt ?? 0))[0];
-  const merged = {
+  return {
     phone: keep.phone || other.phone || '',
     phoneKeys: (keep.phone ? keep.phoneKeys : other.phoneKeys) ?? [],
     email: keep.email || other.email || '',
     remarks: [...new Set(remarks)].join('\n'),
-    students: [...new Set(students)].join(', '),
-    status: placed.length ? 'placed' : (latest?.status ?? ''),
     updatedAt: keep.updatedAt > other.updatedAt ? keep.updatedAt : other.updatedAt,
   };
-  if (placed.length) {
-    merged.placedCount = Math.max(...placed.map((m) => m.placedCount ?? 1));
-    merged.placedAt = placed.map((m) => m.placedAt).filter(Boolean).sort((a, b) => a - b)[0];
-    merged.statusAt = merged.placedAt;
-  } else if (latest) merged.statusAt = latest.statusAt;
-  return merged;
 }
 
 await connectDb();

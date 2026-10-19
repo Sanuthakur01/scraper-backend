@@ -125,8 +125,9 @@ function isAbandoned(run) {
 const istTime = (date) =>
   new Date(date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' });
 
-// Starts a run, unless another collection is still running.
-async function startRun(now, log) {
+// Starts a run, unless another collection is still running. coverageFrom: the earliest posting date
+// the run searched for (its lookback), so the report knows which weeks have data.
+async function startRun(now, log, lookbackDays = 1) {
   const abandoned = (await CollectorRun.find({ status: 'running' }).lean()).filter(isAbandoned);
   if (abandoned.length) {
     await CollectorRun.updateMany(
@@ -142,6 +143,8 @@ async function startRun(now, log) {
     heartbeatAt: new Date(),
     lockedBy: { host: thisHost, pid: process.pid },
     status: 'running',
+    lookbackDays,
+    coverageFrom: new Date(now.getTime() - lookbackDays * DAY_MS),
   });
   // If two collections start at the same moment, the one that started first wins.
   const startedEarlier = (other) =>
@@ -214,9 +217,18 @@ const MERGED_FIELDS = [
   'experienceText', 'experienceBand', 'salaryText', 'skills', 'foundPhones', 'foundEmails',
 ];
 
+// When a new opening was first seen: now. A backfill (backdateFrom set) instead dates it by when it
+// was posted, kept inside the backfill window, so a 30-day backfill doesn't count a month of jobs as
+// "new today". Openings without a posting date are dated now.
+export function firstSeenDate(opening, now, backdateFrom = null) {
+  const posted = opening.postedAt ? new Date(opening.postedAt) : null;
+  if (!backdateFrom || !posted || Number.isNaN(posted.getTime()) || posted > now) return now;
+  return posted < backdateFrom ? backdateFrom : posted;
+}
+
 // A new opening is inserted (with the id it was given in the pool); a stored one gets its new
 // listings and details. An opening first found by this run may also change its counting platform.
-export function writeOperation(opening, now) {
+export function writeOperation(opening, now, backdateFrom = null) {
   const merged = Object.fromEntries(MERGED_FIELDS.map((f) => [f, opening[f]]));
   if (!opening.isNew) {
     const ownedByThisRun = opening.createdThisRun ? { primaryPlatform: opening.primaryPlatform, postedAt: opening.postedAt } : {};
@@ -232,7 +244,7 @@ export function writeOperation(opening, now) {
         course: opening.course,
         isRemote: opening.isRemote,
         postedAt: opening.postedAt,
-        firstSeenAt: now,
+        firstSeenAt: firstSeenDate(opening, now, backdateFrom),
         lastSeenAt: now,
         primaryPlatform: opening.primaryPlatform,
         ...merged,
@@ -251,7 +263,7 @@ const duplicateKeyOnly = (err) => {
 async function writeTouched(pool, now, log) {
   const touched = pool.openings.filter((o) => o.touched);
   if (!touched.length) return 0;
-  const operations = touched.map((opening) => writeOperation(opening, now));
+  const operations = touched.map((opening) => writeOperation(opening, now, pool.backdateFrom));
   for (let attempt = 1; ; attempt++) {
     try {
       await Job.bulkWrite(operations, { ordered: false });
@@ -369,6 +381,12 @@ function resolveEarlierFailures(summaries, log) {
 
 // ---------- The run ----------
 
+// The listing ids already stored for a platform ("LinkedIn:4479308872" -> "4479308872").
+async function storedListingIds(platform) {
+  const keys = await Job.distinct('sourceKeys', { sourceKeys: { $regex: `^${platform}:` } });
+  return keys.filter((k) => k.startsWith(`${platform}:`)).map((k) => k.slice(platform.length + 1));
+}
+
 const limitFor = (source) =>
   source.via === 'scraper' ? (config.scraper.limitPerSearch[source.platform] ?? 100) : config.limitPerSearch;
 
@@ -376,14 +394,19 @@ const limitFor = (source) =>
 // injected so the real run can route LinkedIn to Apify and the other platforms to the Python scraper
 // (see scripts/collect.js), and the demo and tests can run without either.
 // rawDir: where raw results are written first (null = don't write, e.g. for replay and the demo).
-export async function collect({ fetchSearches, now = new Date(), log = console.log, rawDir = config.rawDir }) {
-  const run = await startRun(now, log);
+// lookbackDays: search postings from the last N days (1 = the daily run). More than 1 is a backfill:
+// new jobs are dated by when they were posted (firstSeenDate), and LinkedIn skips the listings already
+// stored, so Apify doesn't charge for them again.
+export async function collect({ fetchSearches, now = new Date(), log = console.log, rawDir = config.rawDir, lookbackDays = 1 }) {
+  const run = await startRun(now, log, lookbackDays);
   const pool = new JobPool();
+  if (lookbackDays > 1) pool.backdateFrom = new Date(now.getTime() - lookbackDays * DAY_MS);
   const summaries = [];
   const waiting = []; // jobs that don't state their experience (see attachWaitingListings)
 
   try {
     const sources = enabledSources(config.disabledSources);
+    const skipIds = lookbackDays > 1 ? await storedListingIds('LinkedIn') : [];
     const tasksBySource = sources.map((source) =>
       COURSES.flatMap((course) =>
         course.searchTerms.flatMap((term) =>
@@ -391,7 +414,10 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
             course,
             term,
             location,
-            input: source.buildInput(term, limitFor(source), location),
+            input: source.buildInput(term, limitFor(source), location, {
+              days: lookbackDays,
+              skipIds: source.platform === 'LinkedIn' ? skipIds : [],
+            }),
           })),
         ),
       ),

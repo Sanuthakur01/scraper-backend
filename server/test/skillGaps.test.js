@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { skillGaps } from '../src/skillGaps.js';
+import { skillGaps, skillPlan } from '../src/skillGaps.js';
 
 const postings = [
   { skills: ['SQL', 'Excel'] }, // covered now
@@ -27,4 +27,24 @@ test('skills already taught are never suggested, and a repeated skill in one pos
   const result = skillGaps([{ skills: ['Azure', 'Azure', 'SQL'] }], ['SQL', 'Azure']);
   assert.deepEqual([result.coveredNow, result.skills], [1, []]);
   assert.deepEqual(skillGaps([{ skills: ['Kafka', 'Kafka'] }], []).skills, [{ skill: 'Kafka', asking: 1, gained: 1, coveredAfter: 1 }]);
+});
+
+test('the plan adds skills one after another, each time the one that matches the most extra postings', () => {
+  const jobs = [
+    { skills: ['SQL', 'AWS'] }, // AWS alone
+    { skills: ['AWS'] }, // AWS alone
+    { skills: ['AWS', 'Docker'] }, // AWS + Docker
+    { skills: ['Docker', 'Kafka'] }, // Docker + Kafka
+    { skills: ['Azure'] }, // Azure alone
+    { skills: ['A', 'B', 'C', 'D', 'E'] }, // 5 missing: out of reach
+  ];
+  const { ladder, reachable, maxAdd } = skillPlan(jobs, ['SQL'], { steps: 3 });
+  assert.equal(maxAdd, 4);
+  assert.deepEqual(ladder, [
+    { skill: 'AWS', added: 2, total: 2 },
+    { skill: 'Docker', added: 1, total: 3 },
+    { skill: 'Azure', added: 1, total: 4 },
+  ]);
+  assert.equal(reachable.length, 5, 'the posting missing 5 skills is out of reach');
+  assert.deepEqual(reachable.find((r) => r.posting === jobs[3]).missing, ['Docker', 'Kafka']);
 });

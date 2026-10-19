@@ -3,7 +3,7 @@ import { after, before, test } from 'node:test';
 import { MongoMemoryServer } from 'mongodb-memory-server-core';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { collect, perSearch } from '../src/collector/collect.js';
-import { Job } from '../src/models.js';
+import { CollectorRun, Job } from '../src/models.js';
 
 let mongo;
 before(async () => {
@@ -182,4 +182,44 @@ test('HR details typed in on the dashboard survive later collections; contacts i
   const run = await collect({ fetchSearches: fetchSearches({ apify: async () => ({ items: [] }), Naukri: none }), now: new Date('2027-06-01T01:30:00Z'), ...quiet });
   assert.equal(run.totals.removedOld, 1);
   assert.deepEqual((await Job.find().lean()).map((j) => j.sourceKeys), [['Naukri:N9']]);
+});
+
+test('a 30-day backfill dates new jobs by when they were posted, and LinkedIn skips listings already stored', async () => {
+  const now = new Date('2027-08-01T01:30:00Z');
+  const DAY = 86_400_000;
+  await Job.create({
+    fingerprint: 'stored-linkedin', title: 'Data Analyst', course: 'data-analyst', firstSeenAt: now, lastSeenAt: now,
+    primaryPlatform: 'LinkedIn', platforms: ['LinkedIn'], sourceKeys: ['LinkedIn:LX1'],
+  });
+  const posted = (n, date) => ({
+    ...naukriItem, jobId: `BF${n}`, jdURL: `/job-listings-bf-${n}`, title: `Data Analyst ${n}`, companyName: `Backfill Co ${n}`,
+    createdDate: date ? Date.parse(date) : undefined,
+  });
+  const linkedinInputs = [];
+  const naukriInputs = [];
+  const run = await collect({
+    fetchSearches: fetchSearches({
+      apify: async (source, input) => (linkedinInputs.push(input), { items: [] }),
+      Naukri: async (source, inputs) => {
+        naukriInputs.push(...inputs);
+        return inputs.map((i) => ({ status: 'ok', items: i.keyword === 'data analyst' ? [posted(1, '2027-07-20T06:00:00Z'), posted(2, '2027-05-01T06:00:00Z'), posted(3)] : [] }));
+      },
+    }),
+    now,
+    lookbackDays: 30,
+    ...quiet,
+  });
+
+  assert.equal(linkedinInputs[0].datePosted, 'r2592000', 'LinkedIn: past month');
+  assert.deepEqual(linkedinInputs[0].skipJobId, ['LX1'], 'LinkedIn: listings already stored are not fetched (or paid for) again');
+  assert.equal(naukriInputs[0].days, 30);
+
+  const firstSeen = async (id) => (await Job.findOne({ sourceKeys: `Naukri:${id}` }).lean()).firstSeenAt.toISOString();
+  assert.equal(await firstSeen('BF1'), '2027-07-20T06:00:00.000Z', 'dated by its posting date');
+  assert.equal(await firstSeen('BF2'), new Date(now.getTime() - 30 * DAY).toISOString(), 'older postings: the start of the window');
+  assert.equal(await firstSeen('BF3'), now.toISOString(), 'no posting date: dated now');
+
+  const stored = await CollectorRun.findById(run._id).lean();
+  assert.equal(stored.lookbackDays, 30);
+  assert.equal(stored.coverageFrom.toISOString(), new Date(now.getTime() - 30 * DAY).toISOString());
 });

@@ -2,7 +2,8 @@
 //   via                               -> who fetches it: 'apify' (an Apify Store actor, actorId) or 'scraper'
 //                                        (our Python scraper in naukri-scraper/, feedScript; see collector/scraperFeed.js)
 //   enabled                           -> false = never searched (DISABLED_SOURCES can also switch one off)
-//   buildInput(term, limit, location) -> the input for one search
+//   buildInput(term, limit, location, { days, skipIds }) -> the input for one search: postings from
+//                                        the last `days` days; skipIds = listing ids not to fetch again
 //   map(item, now)                    -> our common job shape, from one item of that source's output
 //                                        (description and contactText are searched for phones and emails)
 //   locations (optional)              -> search each term once per location, for sources that can't search all of India
@@ -13,6 +14,11 @@
 import { stripHtml } from '../normalize.js';
 
 const DAY_MS = 86_400_000;
+
+// The smallest of a site's date filters that covers `days` (the sites only offer a few).
+const coverDays = (days, offered) => offered.find((d) => d >= days) ?? offered.at(-1);
+// LinkedIn's date filter: past 24 hours, past week, past month.
+const linkedinDatePosted = (days) => ({ 1: 'r86400', 7: 'r604800', 30: 'r2592000' })[coverDays(days, [1, 7, 30])];
 
 const toDate = (value) => {
   if (value == null || value === '') return null;
@@ -34,8 +40,14 @@ export const SOURCES = [
     platform: 'LinkedIn',
     via: 'apify',
     actorId: 'valig/linkedin-jobs-scraper',
-    // datePosted r86400 = posted in the past 24 hours
-    buildInput: (term, limit) => ({ keywords: term, location: 'India', datePosted: 'r86400', limit }),
+    // datePosted r86400 = posted in the past 24 hours (r604800 week, r2592000 month)
+    buildInput: (term, limit, location, { days = 1, skipIds = [] } = {}) => ({
+      keywords: term,
+      location: 'India',
+      datePosted: linkedinDatePosted(days),
+      limit,
+      ...(skipIds.length ? { skipJobId: skipIds } : {}),
+    }),
     map: (item) => ({
       sourceId: item.id,
       title: item.title,
@@ -53,7 +65,8 @@ export const SOURCES = [
     via: 'scraper',
     feedScript: 'naukri_feed.py',
     // Newest first, posted in the last day, all of India. Items are Naukri's own search API job objects.
-    buildInput: (term, limit) => ({ keyword: term, days: 1, limit }),
+    // Naukri's jobAge filter offers 1, 3, 7, 15 or 30 days.
+    buildInput: (term, limit, location, { days = 1 } = {}) => ({ keyword: term, days: coverDays(days, [1, 3, 7, 15, 30]), limit }),
     map: (item) => {
       const label = Object.fromEntries((item.placeholders ?? []).map((p) => [p.type, p.label]));
       return {
@@ -82,7 +95,8 @@ export const SOURCES = [
     feedScript: 'indeed_feed.py',
     // in.indeed.com, newest first, posted in the last day. Items are the job objects Indeed embeds
     // in its search pages.
-    buildInput: (term, limit) => ({ keyword: term, days: 1, limit }),
+    // Indeed's fromage takes any number of days.
+    buildInput: (term, limit, location, { days = 1 } = {}) => ({ keyword: term, days, limit }),
     map: (item) => ({
       sourceId: item.jobkey,
       title: item.displayTitle || item.title,
@@ -101,7 +115,8 @@ export const SOURCES = [
     feedScript: 'glassdoor_feed.py',
     // Searches all of India (Glassdoor location id 115), newest first, posted in the last day.
     // Items are job cards read by glassdoor_feed.py.
-    buildInput: (term, limit) => ({ keyword: term, days: 1, limit }),
+    // Glassdoor's fromAge filter offers 1, 3, 7, 14 or 30 days.
+    buildInput: (term, limit, location, { days = 1 } = {}) => ({ keyword: term, days: coverDays(days, [1, 3, 7, 14, 30]), limit }),
     map: (item, now) => ({
       sourceId: item.jobId,
       title: item.title,

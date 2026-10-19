@@ -3,6 +3,8 @@
 //   Naukri, Indeed, Glassdoor -> our Python scraper in naukri-scraper/ (one Chrome window each)
 // All platforms run at the same time; each one's jobs are saved as soon as it finishes.
 // Exit code: 0 = everything (or most things) saved, 1 = nothing could be collected or saved.
+// --days N (1-30): search postings from the last N days instead of the last day, e.g. a one-off
+// 30-day backfill: `npm run collect -- --days 30`. New jobs are then dated by when they were posted.
 import { config } from '../src/config.js';
 import { enabledSources } from '../src/config/sources.js';
 import { connectDb, disconnectDb } from '../src/db.js';
@@ -23,6 +25,13 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
     await disconnectDb().catch(() => {});
     process.exit(130);
   });
+}
+
+const daysAt = process.argv.indexOf('--days');
+const lookbackDays = daysAt > -1 ? Number(process.argv[daysAt + 1]) : 1;
+if (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > 30) {
+  console.error('--days must be a whole number from 1 to 30.');
+  process.exit(1);
 }
 
 const sources = enabledSources(config.disabledSources);
@@ -47,7 +56,10 @@ try {
 }
 
 try {
-  const run = await collect({ fetchSearches: (source, inputs) => fetchers[source.via](source, inputs) });
+  if (lookbackDays > 1) {
+    console.log(`Backfill: postings from the last ${lookbackDays} days. New jobs are dated by when they were posted.`);
+  }
+  const run = await collect({ fetchSearches: (source, inputs) => fetchers[source.via](source, inputs), lookbackDays });
   const t = run.totals;
   console.log(`\n========== Collection ${run.status.toUpperCase()} in ${Math.round((Date.now() - started) / 60_000)} min ==========`);
   for (const p of run.platforms) {

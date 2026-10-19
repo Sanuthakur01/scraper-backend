@@ -1,5 +1,8 @@
 // The course page's numbers must agree with the dashboard tile and add up.
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { MongoMemoryServer } from 'mongodb-memory-server-core';
 import { config } from '../src/config.js';
@@ -67,6 +70,27 @@ test('the course page total equals the dashboard tile, and every breakdown adds 
   assert.equal(course.salaryShown, 1, '"Not Disclosed" is not a salary');
   assert.equal(course.remote, 1);
   assert.equal(course.freshness.storedTotal, 3);
+});
+
+test('each course page card opens a job list holding exactly the jobs it counts', async () => {
+  const course = await (await fetch(`${base}/course/data-analyst?days=1`)).json();
+  const list = async (params) => (await fetch(`${base}/jobs?course=data-analyst&days=1&limit=100&${params}`)).json();
+
+  assert.equal((await list('')).total, course.total, 'New jobs');
+
+  const several = await list('sites=2');
+  assert.equal(several.total, course.multiPlatform, 'Listed on 2+ sites');
+  assert.ok(several.total > 0 && several.total < course.total, 'the test data has some such jobs, not all');
+  assert.ok(several.items.every((job) => job.platforms.length >= 2));
+
+  const salary = await list('salary=shown');
+  assert.equal(salary.total, course.salaryShown, 'Salary shown');
+  assert.ok(salary.total > 0 && salary.total < course.total);
+  assert.ok(salary.items.every((job) => job.salaryText && !/not disclosed/i.test(job.salaryText)), '"Not Disclosed" is not a salary');
+
+  for (const [band, count] of Object.entries(course.experience)) {
+    assert.equal((await list(`exp=${band}`)).total, count, `${band} years' experience`);
+  }
 });
 
 test('an unknown course gives a clear 404', async () => {
@@ -192,47 +216,6 @@ test('every skill a course teaches is one the collector looks for', () => {
 const putFollowUp = (id, body) =>
   fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
-test('placement: status, students and number placed are saved; the placed date stays when saved again', async () => {
-  const job3 = await Job.findOne({ fingerprint: 'f3' }).lean();
-  assert.match((await (await putFollowUp(job3._id, { status: 'hired' })).json()).error, /^Status:/);
-  assert.match((await (await putFollowUp(job3._id, { status: 'placed', placedCount: 0 })).json()).error, /^Placed:/);
-
-  let row = await (await putFollowUp(job3._id, { status: 'cvs-sent', students: 'Asha, Ravi' })).json();
-  assert.deepEqual(row.placement, { status: 'cvs-sent', students: 'Asha, Ravi', placedCount: 0, placedAt: null });
-
-  row = await (await putFollowUp(job3._id, { status: 'placed', students: 'Asha, Ravi', placedCount: 2 })).json();
-  assert.equal(row.placement.placedCount, 2);
-  const placedAt = row.placement.placedAt;
-  assert.ok(placedAt);
-  row = await (await putFollowUp(job3._id, { status: 'placed', students: 'Asha, Ravi', placedCount: 2, remarks: 'Joining 1 Nov' })).json();
-  assert.equal(row.placement.placedAt, placedAt, 'saving again keeps the placed date');
-  assert.equal(row.contact.remarks, 'Joining 1 Nov');
-
-  const placements = await (await fetch(`${base}/placements`)).json();
-  const analyst = placements.courses.find((c) => c.id === 'data-analyst');
-  assert.equal(analyst.placedThisMonth, 2);
-  assert.equal(analyst.placedTotal, 2);
-  assert.equal(placements.total.placedThisMonth, 2);
-
-  // A status filter lists jobs from any date (placement work goes on after a job is new).
-  await Job.updateOne({ _id: job3._id }, { $set: { firstSeenAt: new Date(Date.now() - 60 * 24 * HOUR) } });
-  const inPeriod = await (await fetch(`${base}/jobs?days=1`)).json();
-  assert.ok(!inPeriod.items.some((j) => j._id === String(job3._id)), 'old job not in the 1-day list');
-  const working = await (await fetch(`${base}/jobs?days=1&status=any`)).json();
-  assert.ok(working.items.some((j) => j._id === String(job3._id)), 'but listed with a status filter');
-  const placedOnly = await (await fetch(`${base}/jobs?days=1&status=placed`)).json();
-  assert.deepEqual(placedOnly.items.map((j) => j._id), [String(job3._id)]);
-  const csv = await (await fetch(`${base}/jobs.csv?days=1&status=placed`)).text();
-  assert.match(csv.split('\r\n')[0], /Remarks,Placement status,Students,Placed,/);
-  assert.match(csv, /Placed,"Asha, Ravi",2,/);
-  await Job.updateOne({ _id: job3._id }, { $set: { firstSeenAt: new Date(Date.now() - HOUR) } });
-
-  // Clearing everything removes the typed-in details, placement included.
-  row = await (await putFollowUp(job3._id, {})).json();
-  assert.deepEqual(row.placement, { status: '', students: '', placedCount: 0, placedAt: null });
-  assert.equal((await fetch(`${base}/placements`).then((r) => r.json())).total.placedTotal, 0);
-});
-
 test('weekly report: the last 7 days per course, top companies by employer, real cities, and no comparison without a full earlier week', async () => {
   const now = Date.now();
   const acme = (n, company) => ({
@@ -254,16 +237,22 @@ test('weekly report: the last 7 days per course, top companies by employer, real
   assert.ok(report.cities.every((c) => c.name !== 'India (city not stated)' && c.name !== 'Remote'));
   assert.ok(report.from && report.to && report.brand && report.lastRefreshed);
 
+  // Daily collection began 20 days ago, with a run every day of the last two weeks.
   await CollectorRun.create({ startedAt: new Date(now - 20 * 24 * HOUR), finishedAt: new Date(now - 20 * 24 * HOUR), status: 'success' });
+  report = await (await fetch(`${base}/report`)).json();
+  assert.equal(report.comparable, false, 'one early run is not daily collection');
+  await CollectorRun.create(
+    Array.from({ length: 14 }, (_, k) => ({ startedAt: new Date(now - k * 24 * HOUR), finishedAt: new Date(now - k * 24 * HOUR), status: 'success' })),
+  );
   report = await (await fetch(`${base}/report`)).json();
   assert.equal(report.comparable, true);
   assert.equal(report.courses.find((c) => c.id === 'data-analyst').previous, 0);
 });
 
-test('hiring partners: employers with 2+ openings, their HR contacts and placements', async () => {
+test('hiring partners: employers with 2+ openings and their HR contacts', async () => {
   const acme = await Job.findOne({ fingerprint: 'acme1' }).lean();
-  assert.equal((await putFollowUp(acme._id, { phone: '91234 00001', email: 'hr@acme.in', status: 'placed', placedCount: 1 })).status, 200);
-  await Job.updateOne({ fingerprint: 'acme2' }, { $set: { foundEmails: ['careers@acme.in'], manual: { status: 'interview', statusAt: new Date() } } });
+  assert.equal((await putFollowUp(acme._id, { phone: '91234 00001', email: 'hr@acme.in' })).status, 200);
+  await Job.updateOne({ fingerprint: 'acme2' }, { $set: { foundEmails: ['careers@acme.in'] } });
 
   const list = await (await fetch(`${base}/partners`)).json();
   assert.equal(list.minOpenings, 2);
@@ -274,11 +263,10 @@ test('hiring partners: employers with 2+ openings, their HR contacts and placeme
   assert.deepEqual(partner.cities, ['Pune']);
   assert.deepEqual(partner.phones, ['91234 00001']);
   assert.deepEqual(partner.emails, ['hr@acme.in', 'careers@acme.in'], 'typed in first, then found in postings');
-  assert.deepEqual([partner.placed, partner.inProgress], [1, 1]);
 
   const csv = await (await fetch(`${base}/partners.csv`)).text();
-  assert.match(csv.split('\r\n')[0], /^\uFEFF?Company,Openings,Data Analyst,/);
-  assert.match(csv, /Acme Analytics,2,2,0,0,0,Pune,\d{4}-\d\d-\d\d,91234 00001,hr@acme.in; careers@acme.in,1,1/);
+  assert.match(csv.split('\r\n')[0], /^\uFEFF?Company,Openings,Data Analyst,.*,HR phones,HR emails$/);
+  assert.match(csv, /Acme Analytics,2,2,0,0,0,Pune,\d{4}-\d\d-\d\d,91234 00001,hr@acme.in; careers@acme.in\r?$/m);
 });
 
 test('a dashboard hosted elsewhere can use the API only if its address is in CORS_ORIGINS', async () => {
@@ -309,4 +297,97 @@ test('a dashboard hosted elsewhere can use the API only if its address is in COR
     server2.close();
     config.corsOrigins = saved;
   }
+});
+
+test('dashboard pages answer GET and HEAD, with or without a trailing slash', async () => {
+  // A stand-in for the built dashboard: the build has a folder named like each page (report/), which
+  // must not hide the page itself (report.html). The dashboard's links send HEAD /report/ before
+  // prefetching a page.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ijf-out-'));
+  const out = path.join(root, 'client', 'out');
+  await mkdir(path.join(out, 'report'), { recursive: true });
+  await writeFile(path.join(out, 'report.html'), '<p>report</p>');
+  await writeFile(path.join(out, 'index.html'), '<p>home</p>');
+  const saved = config.rootDir;
+  config.rootDir = root;
+  const server2 = createApp().listen(0);
+  try {
+    const site = `http://localhost:${server2.address().port}`;
+    for (const url of ['/report', '/report/']) {
+      const page = await fetch(site + url);
+      assert.equal(page.status, 200, `GET ${url}`);
+      assert.equal(await page.text(), '<p>report</p>');
+      assert.equal((await fetch(site + url, { method: 'HEAD' })).status, 200, `HEAD ${url}`);
+    }
+    assert.equal((await fetch(`${site}/no-such-page`, { method: 'HEAD' })).status, 200, 'other addresses get the dashboard, as with GET');
+  } finally {
+    server2.close();
+    config.rootDir = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('periods are compared only when collected every day; backfilled days are marked', async () => {
+  const now = Date.now();
+  const DAY = 24 * HOUR;
+  // A 30-day backfill that ran long ago doesn't count as daily collection.
+  await CollectorRun.create({ startedAt: new Date(now - 90 * DAY), finishedAt: new Date(now - 90 * DAY), status: 'success', lookbackDays: 30 });
+  await Job.create({
+    fingerprint: 'backfilled-1', title: 'ML Engineer', company: 'Old Co', course: 'data-science', firstSeenAt: new Date(now - 25 * DAY),
+    lastSeenAt: new Date(now - 25 * DAY), primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: ['BF:old1'],
+  });
+
+  // Daily collection began 20 days ago and ran every day of the last two weeks (an earlier test's
+  // runs): 7 days vs the 7 before is comparable, 30 days vs the 30 before is not, even though the
+  // backfill has jobs from then.
+  const week = await (await fetch(`${base}/summary?days=7`)).json();
+  assert.equal(week.comparable, true);
+  const month = await (await fetch(`${base}/summary?days=30`)).json();
+  assert.equal(month.comparable, false);
+  assert.deepEqual(month.previous, {});
+  const course = await (await fetch(`${base}/course/data-science?days=30`)).json();
+  assert.equal(course.previous, 0, 'the course page does not compare either');
+
+  const trends = await (await fetch(`${base}/trends?days=30`)).json();
+  const dailyStart = new Date(now - 20 * DAY + 330 * 60_000).toISOString().slice(0, 10);
+  assert.equal(trends.backfilledBefore, dailyStart, 'days before daily collection began are marked as backfill');
+});
+
+test('a day without a collection run is never compared (it would look like a huge jump)', async () => {
+  const DAY = 24 * HOUR;
+  const IST = 330 * 60_000;
+  const todayStart = Math.floor((Date.now() + IST) / DAY) * DAY - IST; // midnight IST, as a timestamp
+  const yesterday = { startedAt: { $gte: new Date(todayStart - DAY), $lt: new Date(todayStart) } };
+  const runs = await CollectorRun.find(yesterday).lean();
+  assert.ok(runs.length, 'the earlier tests collected yesterday');
+  assert.equal((await (await fetch(`${base}/summary?days=1`)).json()).comparable, true, 'collected yesterday and today');
+
+  await CollectorRun.deleteMany(yesterday);
+  try {
+    const summary = await (await fetch(`${base}/summary?days=1`)).json();
+    assert.equal(summary.comparable, false, 'nothing was collected yesterday');
+    assert.deepEqual(summary.previous, {});
+    assert.equal((await (await fetch(`${base}/course/data-analyst?days=1`)).json()).previous, 0);
+  } finally {
+    await CollectorRun.insertMany(runs);
+  }
+});
+
+test('the job list says how many of its jobs have an HR contact', async () => {
+  const now = Date.now();
+  const job = await Job.create({
+    fingerprint: 'contact-count-1', title: 'Production Analyst', company: 'Count Co', course: 'production-support',
+    firstSeenAt: new Date(now - HOUR), lastSeenAt: new Date(now - HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'],
+    sourceKeys: ['CC:1'],
+  });
+  const count = async () => (await (await fetch(`${base}/jobs?days=1&q=Count%20Co`)).json()).withContact;
+  assert.equal(await count(), 0);
+  await fetch(`${base}/jobs/${job._id}/follow-up`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ remarks: 'Called HR' }),
+  });
+  assert.equal(await count(), 1, 'a typed-in note counts');
+  await Job.updateOne({ _id: job._id }, { $unset: { manual: 1 }, $set: { foundEmails: ['hr@countco.in'] } });
+  assert.equal(await count(), 1, 'an email found in the post counts too');
 });

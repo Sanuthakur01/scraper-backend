@@ -27,25 +27,12 @@ const jobSchema = new mongoose.Schema(
     // Contact details written in the postings themselves. Only the collector changes these.
     foundPhones: [String], // "+91 98765 43210"
     foundEmails: [String],
-    // What the team typed in on the dashboard (api/followUp.js): HR contact and placement progress.
-    // Only the dashboard changes this, so a collection never overwrites it. Absent = nothing entered.
-    //   phoneKeys: the phone number(s) as bare digits (see phoneKey), so a number can't be entered twice
-    //   status: contacted | cvs-sent | interview | placed | closed; statusAt: when it got that status
-    //   placedCount, placedAt: students placed, and when the job was first marked placed
+    // HR contact typed in on the dashboard (api/followUp.js). Only the dashboard changes this, so a
+    // collection never overwrites it. Shown instead of the found phone/email. Absent = nothing entered.
+    // phoneKeys: the phone number(s) as bare digits (see phoneKey), so a number can't be entered twice.
     manual: {
       type: new mongoose.Schema(
-        {
-          phone: String,
-          phoneKeys: { type: [String], default: undefined },
-          email: String,
-          remarks: String,
-          status: String,
-          statusAt: Date,
-          students: String,
-          placedCount: Number,
-          placedAt: Date,
-          updatedAt: Date,
-        },
+        { phone: String, phoneKeys: { type: [String], default: undefined }, email: String, remarks: String, updatedAt: Date },
         { _id: false },
       ),
       default: undefined,
@@ -64,8 +51,6 @@ jobSchema.index({ lastSeenAt: 1 });
 // "Is this phone number already on another job?" (api/followUp.js)
 jobSchema.index({ 'manual.phoneKeys': 1 });
 jobSchema.index({ foundPhones: 1 });
-// Placement progress (dashboard Placements card, status filter of the job list)
-jobSchema.index({ 'manual.status': 1 });
 
 export const Job = mongoose.model('Job', jobSchema);
 
@@ -119,6 +104,8 @@ const collectorRunSchema = new mongoose.Schema(
     lockedBy: { host: String, pid: Number }, // the PC and process running it
     heartbeatAt: Date, // updated every 30 seconds while it runs
     finishedAt: Date,
+    lookbackDays: Number, // postings searched from the last N days (1 = daily; more = a backfill)
+    coverageFrom: Date, // startedAt minus lookbackDays: the earliest posting date this run looked for
     status: { type: String, enum: ['running', 'success', 'partial', 'failed'], default: 'running' },
     platforms: [platformSchema],
     searches: [searchSchema],

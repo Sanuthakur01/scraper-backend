@@ -57,14 +57,17 @@ export function createApp() {
   if (fs.existsSync(out)) {
     // Pages are built as files: /course/data-analyst -> course/data-analyst.html. Checked before the
     // static files because the build also has a folder of the same name, which would win otherwise.
+    // HEAD as well as GET: the dashboard's links ask whether a page exists (HEAD /report/) before
+    // prefetching it.
+    const isRead = (req) => req.method === 'GET' || req.method === 'HEAD';
     app.use((req, res, next) => {
-      if (req.method !== 'GET' || path.extname(req.path)) return next();
+      if (!isRead(req) || path.extname(req.path)) return next();
       const page = path.join(out, `${req.path.replace(/\/+$/, '')}.html`);
       if (page.startsWith(out + path.sep) && fs.existsSync(page)) return res.sendFile(page);
       next();
     });
     app.use(express.static(out));
-    app.use((req, res, next) => (req.method === 'GET' ? res.sendFile(path.join(out, 'index.html')) : next()));
+    app.use((req, res, next) => (isRead(req) ? res.sendFile(path.join(out, 'index.html')) : next()));
   }
 
   app.use((err, req, res, next) => {

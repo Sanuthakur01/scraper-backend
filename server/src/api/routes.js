@@ -6,8 +6,8 @@ import { enabledSources } from '../config/sources.js';
 import { CollectorRun, Job } from '../models.js';
 import { SKILL_NAMES, phoneKey } from '../normalize.js';
 import { groupByCompany, hiringPartners } from '../companies.js';
-import { skillGaps } from '../skillGaps.js';
-import { PHONE_EXISTS, PLACEMENT_STATUSES, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
+import { skillGaps, skillPlan } from '../skillGaps.js';
+import { PHONE_EXISTS, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
 
 const router = express.Router();
 const DAY_MS = 86_400_000;
@@ -29,6 +29,32 @@ const latestRun = () =>
     .sort({ startedAt: -1 })
     .lean();
 
+// When the daily collection started. Counts from before it come from a one-off backfill (if any),
+// which fetches the newest postings first and may be incomplete for older days, so the trend chart
+// marks those days.
+async function dailySince() {
+  const run = await CollectorRun.findOne(
+    { status: { $in: ['success', 'partial'] }, $or: [{ lookbackDays: { $exists: false } }, { lookbackDays: { $lte: 1 } }] },
+    { startedAt: 1 },
+  )
+    .sort({ startedAt: 1 })
+    .lean();
+  return run?.startedAt ?? null;
+}
+
+// A period is compared with the one before only when a collection ran on every IST day of both (any
+// finished run). A day without a run has almost no new jobs, and the next run's count then holds two
+// days, so comparing would show a huge jump that didn't happen ("+5900% vs previous day"). Days
+// before the daily collection began have no runs, so they are never compared either.
+async function collectedEveryDay(from, to) {
+  const runs = await CollectorRun.find({ status: { $in: ['success', 'partial'] }, startedAt: { $gte: from, $lt: to } }, { startedAt: 1 }).lean();
+  const collected = new Set(runs.map((run) => istDate(run.startedAt)));
+  for (let day = from.getTime(); day < to.getTime(); day += DAY_MS) {
+    if (!collected.has(istDate(new Date(day)))) return false;
+  }
+  return true;
+}
+
 // Days are IST calendar days ending on the day of the latest collection run, so the dashboard
 // shows the latest daily update even before today's run has happened.
 async function dayRange(days) {
@@ -39,24 +65,19 @@ async function dayRange(days) {
   return { anchor, start, end, run };
 }
 
-const STATUS_LABELS = {
-  contacted: 'Contacted',
-  'cvs-sent': 'CVs sent',
-  interview: 'Interview',
-  placed: 'Placed',
-  closed: 'Closed',
-};
+// Used both to count a course page's cards and to list the jobs behind them (the job list's sites=2
+// and salary=shown filters), so a card's number and its list always agree.
+const ON_SEVERAL_SITES = { 'platforms.1': { $exists: true } };
+const SALARY_SHOWN = { salaryText: { $nin: [null, ''], $not: /not disclosed/i } };
 
-// status: a placement status, or 'any' for every job the team has a status on. Placement work goes on
-// after a job is new, so with a status the period is ignored: all dates.
 function jobFilter(query, { start, end }) {
-  const status = query.status === 'any' || PLACEMENT_STATUSES.includes(query.status) ? query.status : null;
-  const filter = status ? { 'manual.status': status === 'any' ? { $in: PLACEMENT_STATUSES } : status } : {};
-  if (!status) filter.firstSeenAt = { $gte: start, $lt: end };
+  const filter = { firstSeenAt: { $gte: start, $lt: end } };
   if (query.course) filter.course = String(query.course);
   if (query.platform) filter.platforms = String(query.platform);
   if (query.city) filter.cities = String(query.city);
   if (query.exp) filter.experienceBand = String(query.exp);
+  if (query.sites === '2') Object.assign(filter, ON_SEVERAL_SITES);
+  if (query.salary === 'shown') Object.assign(filter, SALARY_SHOWN);
   const search = String(query.q ?? '').trim();
   if (search) {
     const rx = new RegExp(escapeRegex(search), 'i');
@@ -116,7 +137,8 @@ router.get('/meta', wrap(async (req, res) => {
   });
 }));
 
-// New jobs per course in the chosen window, plus the window before it for "vs previous".
+// New jobs per course in the chosen window, plus the window before it for "vs previous" (empty when
+// the two can't be compared fairly: see collectedEveryDay).
 router.get('/summary', wrap(async (req, res) => {
   const days = clampDays(req.query.days, 1, 90);
   const { anchor, start, end } = await dayRange(days);
@@ -126,8 +148,8 @@ router.get('/summary', wrap(async (req, res) => {
       { $match: { firstSeenAt: { $gte: from, $lt: to } } },
       { $group: { _id: '$course', count: { $sum: 1 } } },
     ]).then(countBy);
-  const [current, previous] = await Promise.all([byCourse(start, end), byCourse(prevStart, start)]);
-  res.json({ days, anchor, current, previous });
+  const [current, previous, comparable] = await Promise.all([byCourse(start, end), byCourse(prevStart, start), collectedEveryDay(prevStart, end)]);
+  res.json({ days, anchor, current, previous: comparable ? previous : {}, comparable });
 }));
 
 // New jobs per platform and course. Each job counts once, under its primary platform.
@@ -140,7 +162,7 @@ router.get('/platforms', wrap(async (req, res) => {
       { $match: inRange },
       { $group: { _id: { platform: '$primaryPlatform', course: '$course' }, count: { $sum: 1 } } },
     ]),
-    Job.countDocuments({ ...inRange, 'platforms.1': { $exists: true } }),
+    Job.countDocuments({ ...inRange, ...ON_SEVERAL_SITES }),
   ]);
   const platforms = await platformsInUse(inRange);
   const result = platforms.map((platform) => {
@@ -179,7 +201,10 @@ router.get('/trends', wrap(async (req, res) => {
     const point = byDay.get(r._id.day);
     if (point) point[r._id.course] = r.count;
   }
-  res.json({ days, anchor: range.anchor, series });
+  // Days before the daily collection started came from a one-off backfill (may be incomplete).
+  const since = await dailySince();
+  const backfilledBefore = since && first && first.firstSeenAt < since ? istDate(since) : null;
+  res.json({ days, anchor: range.anchor, series, backfilledBefore });
 }));
 
 // Top companies, cities, experience levels and skills in the window.
@@ -256,7 +281,7 @@ router.get('/course/:id', wrap(async (req, res) => {
           total: [{ $count: 'n' }],
           counted: [{ $group: { _id: '$primaryPlatform', count: { $sum: 1 } } }],
           listed: [{ $unwind: '$platforms' }, { $group: { _id: '$platforms', count: { $sum: 1 } } }],
-          multiPlatform: [{ $match: { 'platforms.1': { $exists: true } } }, { $count: 'n' }],
+          multiPlatform: [{ $match: ON_SEVERAL_SITES }, { $count: 'n' }],
           postingAge: [
             {
               $group: {
@@ -277,7 +302,7 @@ router.get('/course/:id', wrap(async (req, res) => {
             },
           ],
           experience: [{ $group: { _id: '$experienceBand', count: { $sum: 1 } } }],
-          salaryShown: [{ $match: { salaryText: { $nin: [null, ''], $not: /not disclosed/i } } }, { $count: 'n' }],
+          salaryShown: [{ $match: SALARY_SHOWN }, { $count: 'n' }],
           remote: [{ $match: { $or: [{ isRemote: true }, { cities: 'Remote' }] } }, { $count: 'n' }],
           foundRange: [{ $group: { _id: null, first: { $min: '$firstSeenAt' }, last: { $max: '$firstSeenAt' } } }],
           companies: top('company'),
@@ -286,7 +311,9 @@ router.get('/course/:id', wrap(async (req, res) => {
         },
       },
     ]),
-    Job.countDocuments({ course: course.id, firstSeenAt: { $gte: prevStart, $lt: range.start } }),
+    Job.countDocuments({ course: course.id, firstSeenAt: { $gte: prevStart, $lt: range.start } }).then(async (count) =>
+      (await collectedEveryDay(prevStart, range.end)) ? count : 0,
+    ),
     platformsInUse(match),
     Job.findOne({ course: course.id }, { firstSeenAt: 1 }).sort({ firstSeenAt: 1 }).lean(),
     Job.countDocuments({ course: course.id }),
@@ -336,52 +363,40 @@ router.get('/skill-gaps', wrap(async (req, res) => {
   const range = await dayRange(days);
   const match = { course: course.id, firstSeenAt: { $gte: range.start, $lt: range.end } };
   const [postings, platforms] = await Promise.all([
-    Job.find(match, { _id: 0, skills: 1, firstSeenAt: 1 }).lean(),
+    Job.find(match, { skills: 1, firstSeenAt: 1, title: 1, company: 1, cities: 1, primaryPlatform: 1, links: 1 }).lean(),
     Job.distinct('platforms', match),
   ]);
   const seen = postings.map((p) => p.firstSeenAt.getTime());
+  const plan = skillPlan(postings, course.teaches);
   res.json({
     course: { id: course.id, name: course.name },
     days,
     anchor: range.anchor,
     teaches: course.teaches,
     ...skillGaps(postings, course.teaches),
+    // Adding skills one after another, and the jobs within reach (for trying other combinations and
+    // seeing which jobs a choice would open up).
+    plan: {
+      ladder: plan.ladder,
+      maxAdd: plan.maxAdd,
+      jobs: plan.reachable.map(({ posting, missing }) => ({
+        id: posting._id,
+        title: posting.title,
+        company: posting.company ?? '',
+        cities: posting.cities ?? [],
+        platform: posting.primaryPlatform,
+        url: posting.links?.[posting.primaryPlatform] ?? Object.values(posting.links ?? {})[0] ?? '',
+        missing,
+      })),
+    },
     trackedSkillCount: SKILL_NAMES.length,
     source: {
       platforms: platforms.sort(),
-      firstSeenFrom: seen.length ? new Date(Math.min(...seen)) : null,
-      firstSeenTo: seen.length ? new Date(Math.max(...seen)) : null,
+      firstSeenFrom: seen.length ? new Date(seen.reduce((a, b) => Math.min(a, b))) : null,
+      firstSeenTo: seen.length ? new Date(seen.reduce((a, b) => Math.max(a, b))) : null,
       lastRefreshed: range.run?.finishedAt ?? null,
     },
   });
-}));
-
-// ---------- Placements ----------
-
-// Placement progress per course: jobs at each status now, and students placed this month and last
-// month (IST calendar months, by the day each job was first marked placed).
-router.get('/placements', wrap(async (req, res) => {
-  const thisMonth = istDate(new Date()).slice(0, 7);
-  const lastMonth = istDate(new Date(istDayStart(`${thisMonth}-01`).getTime() - DAY_MS)).slice(0, 7);
-  const jobs = await Job.find({ 'manual.status': { $in: PLACEMENT_STATUSES } }, { course: 1, manual: 1 }).lean();
-  const empty = () => ({ contacted: 0, cvsSent: 0, interview: 0, closed: 0, placedThisMonth: 0, placedLastMonth: 0, placedTotal: 0 });
-  const rows = Object.fromEntries(COURSES.map((c) => [c.id, empty()]));
-  const total = empty();
-  const key = { contacted: 'contacted', 'cvs-sent': 'cvsSent', interview: 'interview', closed: 'closed' };
-  for (const job of jobs) {
-    const row = rows[job.course];
-    if (!row) continue;
-    const { status, placedCount = 1, placedAt } = job.manual;
-    for (const r of [row, total]) {
-      if (key[status]) r[key[status]]++;
-      if (status !== 'placed') continue;
-      r.placedTotal += placedCount;
-      const month = placedAt ? istDate(placedAt).slice(0, 7) : null;
-      if (month === thisMonth) r.placedThisMonth += placedCount;
-      if (month === lastMonth) r.placedLastMonth += placedCount;
-    }
-  }
-  res.json({ thisMonth, lastMonth, courses: COURSES.map((c) => ({ id: c.id, name: c.name, ...rows[c.id] })), total });
 }));
 
 // ---------- Weekly report ----------
@@ -396,7 +411,7 @@ router.get('/report', wrap(async (req, res) => {
   const range = await dayRange(REPORT_DAYS);
   const prevStart = new Date(range.start.getTime() - REPORT_DAYS * DAY_MS);
   const inRange = { firstSeenAt: { $gte: range.start, $lt: range.end } };
-  const [[facets], previousRows, firstRun, platforms, companies] = await Promise.all([
+  const [[facets], previousRows, comparable, platforms, companies] = await Promise.all([
     Job.aggregate([
       { $match: inRange },
       {
@@ -421,11 +436,10 @@ router.get('/report', wrap(async (req, res) => {
       { $match: { firstSeenAt: { $gte: prevStart, $lt: range.start } } },
       { $group: { _id: '$course', count: { $sum: 1 } } },
     ]).then(countBy),
-    CollectorRun.findOne({ status: { $in: ['success', 'partial'] } }, { startedAt: 1 }).sort({ startedAt: 1 }).lean(),
+    collectedEveryDay(prevStart, range.end),
     Job.distinct('platforms', inRange),
     Job.find(inRange, { _id: 0, company: 1 }).lean(),
   ]);
-  const comparable = Boolean(firstRun && firstRun.startedAt <= prevStart);
   const current = countBy(facets.courses);
   const toList = (rows) => rows.map((r) => ({ name: r._id, count: r.count }));
   res.json({
@@ -455,8 +469,8 @@ router.get('/report', wrap(async (req, res) => {
 // ---------- Hiring partners ----------
 
 // Companies that posted at least PARTNER_MIN_OPENINGS openings for the courses in the last
-// PARTNER_DAYS days (large IT services firms never reach the database), with HR contacts and the
-// team's placements with them. See companies.js.
+// PARTNER_DAYS days (large IT services firms never reach the database), with their HR contacts and
+// how recently they posted. See companies.js.
 const PARTNER_DAYS = 90;
 const PARTNER_MIN_OPENINGS = 2;
 
@@ -482,7 +496,7 @@ router.get('/partners', wrap(async (req, res) => res.json(await partnerList())))
 
 router.get('/partners.csv', wrap(async (req, res) => {
   const list = await partnerList();
-  const header = ['Company', 'Openings', ...COURSES.map((c) => c.name), 'Cities', 'Last posted (IST)', 'HR phones', 'HR emails', 'In progress', 'Placed'];
+  const header = ['Company', 'Openings', ...COURSES.map((c) => c.name), 'Cities', 'Last posted (IST)', 'HR phones', 'HR emails'];
   const lines = list.partners.map((p) =>
     [
       p.name,
@@ -492,8 +506,6 @@ router.get('/partners.csv', wrap(async (req, res) => {
       istDate(p.lastPosted),
       p.phones.join('; '),
       p.emails.join('; '),
-      p.inProgress,
-      p.placed,
     ]
       .map(csvCell)
       .join(','),
@@ -518,17 +530,28 @@ router.get('/jobs', wrap(async (req, res) => {
   const filter = jobFilter(req.query, range);
   const pageSize = Math.min(clampDays(req.query.limit, 25, 100), 100);
   const page = clampDays(req.query.page, 1, 100_000);
-  const [items, total] = await Promise.all([
+  // withContact: how many of these jobs have an HR phone, email or note (typed in, or found in the post).
+  const hasContact = { $or: [{ manual: { $exists: true } }, { 'foundPhones.0': { $exists: true } }, { 'foundEmails.0': { $exists: true } }] };
+  const [items, total, withContact] = await Promise.all([
     Job.find(filter, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
     Job.countDocuments(filter),
+    Job.countDocuments({ $and: [filter, hasContact] }),
   ]);
-  res.json({ days, anchor: range.anchor, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), items: items.map(jobRow) });
+  res.json({
+    days,
+    anchor: range.anchor,
+    page,
+    pageSize,
+    total,
+    withContact,
+    pages: Math.max(1, Math.ceil(total / pageSize)),
+    items: items.map(jobRow),
+  });
 }));
 
-// Saves what the team typed in for one job (HR phone, email, remarks; placement status, students,
-// number placed) and returns the updated row. An empty field clears it; when everything is empty the
-// job has no typed-in details (and shows what its postings say, if anything). The collector never
-// writes these, so the next run can't undo them.
+// Saves the HR phone, email and remarks typed in for one job and returns the updated row. An empty
+// field clears it; when all three are empty the job has no typed-in details (and shows what its
+// postings say, if anything). The collector never writes these, so the next run can't undo them.
 // A phone number another job already has is refused (409) with PHONE_EXISTS, and `detail` says which job.
 router.put('/jobs/:id/follow-up', express.json({ limit: '10kb' }), wrap(async (req, res) => {
   const notFound = () => res.status(404).json({ error: 'Job not found. It may have been removed.' });
@@ -545,7 +568,7 @@ router.put('/jobs/:id/follow-up', express.json({ limit: '10kb' }), wrap(async (r
     return res.status(409).json({ error: PHONE_EXISTS, detail: `${number} is already saved on ${where}.` });
   }
 
-  const record = manualRecord(input.value, current.manual, new Date());
+  const record = manualRecord(input.value, new Date());
   const update = record ? { $set: { manual: record } } : { $unset: { manual: 1 } };
   const job = await Job.findByIdAndUpdate(req.params.id, update, { returnDocument: 'after', projection: JOB_FIELDS }).lean();
   if (!job) return notFound();
@@ -564,7 +587,7 @@ router.get('/jobs.csv', wrap(async (req, res) => {
   const platforms = await platformsInUse({ firstSeenAt: { $gte: range.start, $lt: range.end } });
   const header = [
     'First seen (IST)', 'Posted (IST)', 'Course', 'Title', 'Company', 'Cities', 'Experience', 'Salary', 'Listed on',
-    'Phone', 'Email', 'Remarks', 'Placement status', 'Students', 'Placed', ...platforms.map((p) => `${p} link`),
+    'Phone', 'Email', 'Remarks', ...platforms.map((p) => `${p} link`),
   ];
   const lines = jobs.map(jobRow).map((job) =>
     [
@@ -580,9 +603,6 @@ router.get('/jobs.csv', wrap(async (req, res) => {
       job.contact.phone,
       job.contact.email,
       job.contact.remarks,
-      STATUS_LABELS[job.placement.status] ?? '',
-      job.placement.students,
-      job.placement.placedCount || '',
       ...platforms.map((p) => job.links?.[p] ?? ''),
     ]
       .map(csvCell)

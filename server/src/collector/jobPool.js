@@ -105,6 +105,8 @@ export function mergeListing(opening, listing) {
 
 export class JobPool {
   openings = [];
+  // A backfill run (see collect's lookbackDays) dates new openings by when they were posted, from here on.
+  backdateFrom = null;
   #byId = new Map();
   #bySourceKey = new Map();
   #byFingerprint = new Map();
