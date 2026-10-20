@@ -78,6 +78,62 @@ test('after a rate-limit error (HTTP 429) the retry waits longer', async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('after "blocked" (HTTP 403) the retry also waits longer', async () => {
+  const dir = fakeScraper('RateLimited: Indeed kept refusing pages (HTTP 403, blocked)');
+  const fetchFromScraper = createScraperFeedFetcher(
+    { dir, python: process.execPath, headless: false, timeoutMinutes: 1, retryDelayMs: 0, rateLimitDelayMs: 300 },
+    () => {},
+  );
+  const started = Date.now();
+  const results = await fetchFromScraper({ platform: 'Indeed', feedScript: 'glassdoor_feed.py' }, [{ keyword: 'data engineer', days: 1, limit: 20 }]);
+  assert.equal(results[0].status, 'ok');
+  assert.ok(Date.now() - started >= 300, 'waited rateLimitDelayMs before the retry');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a Chrome profile already open in another window gives a clear message", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scraper-feed-test-'));
+  fs.mkdirSync(path.join(dir, 'scraper_file'));
+  fs.writeFileSync(
+    path.join(dir, 'scraper_file', 'indeed_feed.py'),
+    "console.error('playwright: Failed to create a ProcessSingleton for your profile directory'); process.exit(1);",
+  );
+  const fetchFromScraper = createScraperFeedFetcher({ dir, python: process.execPath, headless: false, timeoutMinutes: 1, retryDelayMs: 0 }, () => {});
+  await assert.rejects(
+    fetchFromScraper({ platform: 'Indeed', feedScript: 'indeed_feed.py' }, [{ keyword: 'data analyst', days: 1, limit: 20 }]),
+    /Indeed's Chrome profile is open in another Chrome window/,
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a platform that needs longer gets its own time limit; a scraper stopped by the limit is retried, saying why', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scraper-feed-test-'));
+  fs.mkdirSync(path.join(dir, 'scraper_file'));
+  // Takes 600 ms per search term.
+  fs.writeFileSync(
+    path.join(dir, 'scraper_file', 'indeed_feed.py'),
+    `const keywords = process.argv.slice(2).filter((a, i, all) => !a.startsWith('--') && !all[i - 1]?.startsWith('--'));
+     (async () => { for (const keyword of keywords) {
+       await new Promise((r) => setTimeout(r, 600));
+       console.log(JSON.stringify({ keyword, status: 'ok', items: [{ id: keyword }] }));
+     } })();`,
+  );
+  const inputs = ['data analyst', 'data engineer'].map((keyword) => ({ keyword, days: 1, limit: 20 }));
+  const limit = 0.015; // 0.9 s: the first term fits, the second doesn't
+
+  const logs = [];
+  const tight = createScraperFeedFetcher({ dir, python: process.execPath, headless: false, timeoutMinutes: limit, retryDelayMs: 0 }, (l) => logs.push(l));
+  const results = await tight({ platform: 'Indeed', feedScript: 'indeed_feed.py' }, inputs);
+  assert.deepEqual(results.map((r) => r.status), ['ok', 'ok'], 'the unfinished term was done by the retry');
+  assert.ok(logs.some((l) => /retrying 1 failed search\(es\).*Indeed scraper stopped after/.test(l)), 'the retry says the time limit stopped it');
+
+  logs.length = 0;
+  const roomy = createScraperFeedFetcher({ dir, python: process.execPath, headless: false, timeoutMinutes: limit, retryDelayMs: 0 }, (l) => logs.push(l));
+  await roomy({ platform: 'Indeed', feedScript: 'indeed_feed.py', minTimeoutMinutes: 0.1 }, inputs);
+  assert.ok(!logs.some((l) => l.includes('retrying')), "with the platform's own longer limit, one run does both terms");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('a missing feed script gives a clear error', async () => {
   const fetchFromScraper = createScraperFeedFetcher({ dir: path.join(os.tmpdir(), 'no-such-scraper'), python: '', headless: false, timeoutMinutes: 1 });
   await assert.rejects(

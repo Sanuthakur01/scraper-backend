@@ -8,7 +8,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import { MongoMemoryServer } from 'mongodb-memory-server-core';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { collect, perSearch } from '../src/collector/collect.js';
-import { CollectorRun, Job } from '../src/models.js';
+import { CollectorRun, Job, NonFilteredJob } from '../src/models.js';
 
 let mongo;
 before(async () => {
@@ -22,6 +22,7 @@ after(async () => {
 });
 beforeEach(async () => {
   await Job.deleteMany({});
+  await NonFilteredJob.deleteMany({});
   await CollectorRun.deleteMany({});
 });
 
@@ -62,14 +63,15 @@ test('each platform is saved as soon as it finishes, without waiting for slower 
   assert.equal(await Job.countDocuments(), 3);
 });
 
-test('big companies and jobs outside 2-5 years are left out; a job without stated experience is kept only when it matches one', async () => {
+test('big companies and jobs asking under 2 years are left out (5+ years are kept); a job without stated experience is kept only when it matches one', async () => {
   const tcs = naukriJob('N7', 'Data Engineer', 'Tata Consultancy Services');
   const junior = { ...naukriJob('N8', 'Data Scientist', 'Delta'), minimumExperience: '0', maximumExperience: '2' };
+  const senior = { ...naukriJob('N9', 'Data Scientist', 'Gamma'), minimumExperience: '8', maximumExperience: '12' };
   const sameAsAlpha = { jobkey: 'i2', displayTitle: 'Data Engineer', company: 'Alpha', formattedLocation: 'Pune, Maharashtra' };
   const loneIndeed = { jobkey: 'i3', displayTitle: 'Data Engineer', company: 'Omega', formattedLocation: 'Pune, Maharashtra' };
   const run = await collect({
     fetchSearches: fetchWith({
-      Naukri: okBatch([...naukriJobs, tcs, junior]),
+      Naukri: okBatch([...naukriJobs, tcs, junior, senior]),
       Indeed: async (source, inputs) => inputs.map((i) => ({ status: 'ok', items: i.keyword === 'data engineer' ? [sameAsAlpha, loneIndeed] : [] })),
     }),
     now: new Date('2026-10-16T01:45:00Z'),
@@ -77,7 +79,8 @@ test('big companies and jobs outside 2-5 years are left out; a job without state
     rawDir: null,
   });
   const jobs = await Job.find().lean();
-  assert.deepEqual(jobs.map((j) => j.company).sort(), ['Alpha', 'Beta'], 'no TCS, no 0-2 year job, no lone job without experience');
+  assert.deepEqual(jobs.map((j) => j.company).sort(), ['Alpha', 'Beta', 'Gamma'], 'no TCS, no 0-2 year job, no lone job without experience');
+  assert.equal(jobs.find((j) => j.company === 'Gamma').experienceBand, '5+', 'an 8-12 year job is kept, in the 5+ (more than 5) group');
   assert.deepEqual([...jobs.find((j) => j.company === 'Alpha').platforms].sort(), ['Indeed', 'Naukri'], 'the Indeed listing joined the matching job');
   assert.ok(run.totals.bigCompany >= 1 && run.totals.outsideExperience >= 1);
   assert.equal(run.totals.noExperience, 2);

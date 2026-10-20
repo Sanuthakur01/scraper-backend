@@ -14,7 +14,7 @@ const jobSchema = new mongoose.Schema(
     experienceMin: Number,
     experienceMax: Number,
     experienceText: String,
-    experienceBand: String, // fresher | 1-2 | 3-5 | 6+ | unknown
+    experienceBand: String, // fresher | 1 … 5 | 5+ (more than 5) | unknown (normalize.js experienceBand)
     salaryText: String,
     skills: [String],
     postedAt: Date, // the platform's own posting date (best effort)
@@ -37,6 +37,9 @@ const jobSchema = new mongoose.Schema(
       ),
       default: undefined,
     },
+    // NonFilteredJob only: why the keep rules leave it out: 'big-company' | 'experience' (under the
+    // minimum) | 'no-experience' (not stated, and not the same job as a kept one). See leftOutReason.
+    leftOutBy: String,
   },
   { versionKey: false, minimize: false },
 );
@@ -53,6 +56,12 @@ jobSchema.index({ 'manual.phoneKeys': 1 });
 jobSchema.index({ foundPhones: 1 });
 
 export const Job = mongoose.model('Job', jobSchema);
+
+// "Non-filtered" jobs: openings that fit a course but that the keep rules leave out (a large IT
+// services firm, under the minimum experience, or experience not stated). Same shape and indexes as
+// Job, in their own collection, so the filtered jobs above are never mixed with them; the dashboard's
+// Filtered / Non-filtered switch picks the collection. A platform listing is never in both.
+export const NonFilteredJob = mongoose.model('NonFilteredJob', jobSchema.clone(), 'nonfilteredjobs');
 
 // One document per collector run, so the dashboard can show "last refreshed" and failures can be traced.
 const searchSchema = new mongoose.Schema(
@@ -121,7 +130,18 @@ const collectorRunSchema = new mongoose.Schema(
       inserted: Number,
       updated: Number,
       removedOld: Number,
+      // Non-filtered jobs (NonFilteredJob) saved by this run. alreadyKept: left-out listings that are
+      // the same opening as a kept job, so not added; removedAsKept: stored non-filtered jobs that
+      // turned out to be the same opening as a kept job, so removed (the kept job wins).
+      nonFiltered: {
+        inserted: Number,
+        updated: Number,
+        alreadyKept: Number,
+        removedAsKept: Number,
+        removedOld: Number,
+      },
     },
+    nonFilteredError: String, // the non-filtered save failed (the kept jobs are saved regardless)
     error: String,
   },
   { versionKey: false },

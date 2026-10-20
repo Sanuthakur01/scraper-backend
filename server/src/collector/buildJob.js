@@ -13,9 +13,11 @@ import {
 } from '../normalize.js';
 
 // Turns one raw item into a clean job, or returns { skip: reason }:
-//   incomplete · outside-india · no-course · big-company (config/filters.js) · experience (outside 2-5 yrs)
+//   incomplete · outside-india · no-course · big-company (config/filters.js) · experience (under the minimum)
+// The rules are checked in that order. big-company and experience come back with the job too
+// ({ skip, job }): the collector keeps those apart as non-filtered jobs.
 // A job that doesn't state its experience comes back with experienceUnknown: the collector keeps it only
-// if it is the same job as one that does state 2-5 years on another platform.
+// if it is the same job as one that does state its experience on another platform (else non-filtered).
 export function buildJob(source, rawItem, now) {
   const raw = source.map(rawItem, now);
   const title = cleanText(raw.title);
@@ -29,18 +31,17 @@ export function buildJob(source, rawItem, now) {
   if (!course) return { skip: 'no-course' };
 
   const company = cleanText(raw.company);
-  if (isExcludedCompany(company)) return { skip: 'big-company' };
+  const bigCompany = isExcludedCompany(company);
 
   let experience = { min: raw.experienceMin ?? null, max: raw.experienceMax ?? null };
   if (experience.min == null) experience = parseExperience(title, raw.experienceText, raw.description);
   if (experience.min == null) experience = experienceFromLevel(raw.experienceText);
-  if (experience.min != null && !experienceInRange(experience.min)) return { skip: 'experience' };
 
   const { cities, isRemote } = parseLocation(raw.locationText);
   const sourceId = String(raw.sourceId ?? url);
   const contacts = extractContacts(raw.description, raw.contactText);
 
-  return {
+  const built = {
     job: {
       fingerprint: fingerprintFor({ company, title, city: cities[0], platform: source.platform, sourceId }),
       title,
@@ -63,4 +64,7 @@ export function buildJob(source, rawItem, now) {
       experienceUnknown: experience.min == null,
     },
   };
+  if (bigCompany) return { skip: 'big-company', ...built };
+  if (experience.min != null && !experienceInRange(experience.min)) return { skip: 'experience', ...built };
+  return built;
 }

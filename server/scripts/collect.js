@@ -6,10 +6,12 @@
 // --days N (1-30): search postings from the last N days instead of the last day, e.g. a one-off
 // 30-day backfill: `npm run collect -- --days 30`. New jobs are then dated by when they were posted.
 import { config } from '../src/config.js';
+import { COURSES } from '../src/config/courses.js';
+import { experienceRangeText } from '../src/config/filters.js';
 import { enabledSources } from '../src/config/sources.js';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { collect, perSearch, stopActiveRun } from '../src/collector/collect.js';
-import { createApifyFetcher } from '../src/collector/apify.js';
+import { checkApifyCredit, createApifyFetcher } from '../src/collector/apify.js';
 import { createScraperFeedFetcher, stopScrapers } from '../src/collector/scraperFeed.js';
 
 // Ctrl+C or closing the window: close the scraper browsers and release the lock before exiting, so
@@ -34,25 +36,54 @@ if (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > 30) {
   process.exit(1);
 }
 
+const started = Date.now();
 const sources = enabledSources(config.disabledSources);
-if (sources.some((s) => s.via === 'apify') && !config.apifyToken) {
-  console.error('APIFY_TOKEN is not set (needed for LinkedIn). Add it to .env, or skip LinkedIn with DISABLED_SOURCES=LinkedIn.');
-  process.exit(1);
+
+// LinkedIn (Apify): if it can't run (no APIFY_TOKEN, or not enough Apify credit left this month), its
+// searches are reported as failed with the reason, and the other platforms are collected as usual.
+let linkedinProblem = '';
+if (sources.some((s) => s.via === 'apify')) {
+  if (!config.apifyToken) {
+    linkedinProblem = 'APIFY_TOKEN is not set, so LinkedIn was skipped. Add it to .env (or set DISABLED_SOURCES=LinkedIn to stop this message).';
+  } else {
+    const searches = COURSES.reduce((n, c) => n + c.searchTerms.length, 0);
+    const credit = await checkApifyCredit(config.apifyToken, { searches, limitPerSearch: config.limitPerSearch });
+    if (!credit.ok) {
+      const resets = credit.resetsAt ? `; it resets on ${new Date(credit.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : '';
+      linkedinProblem = `Not enough Apify credit for LinkedIn: $${credit.left.toFixed(2)} left this month, this run needs about $${credit.needed.toFixed(2)}${resets}. LinkedIn was skipped.`;
+    } else if (credit.left != null) {
+      console.log(`Apify credit: $${credit.left.toFixed(2)} left this month (this run uses about $${credit.needed.toFixed(2)} for LinkedIn).`);
+    }
+  }
+  if (linkedinProblem) console.log(`⚠ ${linkedinProblem}`);
 }
 
-const apifyFetch = config.apifyToken ? createApifyFetcher(config.apifyToken) : null;
+const apifyFetch = config.apifyToken && !linkedinProblem ? createApifyFetcher(config.apifyToken) : null;
 const scraperFetch = createScraperFeedFetcher(config.scraper);
 const fetchers = {
-  apify: perSearch((source, input) => apifyFetch(source.actorId, input), config.apifyConcurrency),
+  apify: apifyFetch
+    ? perSearch((source, input) => apifyFetch(source.actorId, input), config.apifyConcurrency)
+    : async () => {
+        throw new Error(linkedinProblem);
+      },
   scraper: scraperFetch,
 };
 
-const started = Date.now();
-try {
-  await connectDb();
-} catch (err) {
-  console.error(`Could not connect to MongoDB: ${err.message}`);
-  process.exit(1);
+// The database: a short network blip at the start shouldn't cost the whole collection.
+const DB_WAITS_S = [20, 60];
+for (let attempt = 0; ; attempt++) {
+  try {
+    await connectDb();
+    break;
+  } catch (err) {
+    if (attempt >= DB_WAITS_S.length || /MONGODB_URI is not set/.test(err.message)) {
+      console.error(`Could not connect to MongoDB: ${err.message}`);
+      process.exit(1);
+    }
+    console.log(`Could not connect to MongoDB (${err.message}). Trying again in ${DB_WAITS_S[attempt]}s...`);
+    await disconnectDb().catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, DB_WAITS_S[attempt] * 1000));
+  }
 }
 
 try {
@@ -70,8 +101,14 @@ try {
   console.log(`  Total: ${t.unique} jobs this run (${t.inserted} new, ${t.updated} already known); ${t.removedOld} old jobs removed.`);
   console.log(
     `  Left out: ${t.bigCompany} at excluded big companies, ${t.outsideExperience} outside ` +
-      `${config.experience.min}-${config.experience.max} years, ${t.noExperience - t.noExperienceKept} without stated experience ` +
-      `(${t.noExperienceKept} of those were added to a matching 2-${config.experience.max} year job).`,
+      `${experienceRangeText()} years, ${t.noExperience - t.noExperienceKept} without stated experience ` +
+      `(${t.noExperienceKept} of those were added to a matching ${experienceRangeText()} year job).`,
+  );
+  const nf = t.nonFiltered ?? {};
+  console.log(
+    run.nonFilteredError
+      ? `  Non-filtered jobs NOT saved: ${run.nonFilteredError}`
+      : `  Non-filtered (the left-out jobs, on the dashboard's Non-filtered switch): ${nf.inserted ?? 0} new, ${nf.updated ?? 0} already known.`,
   );
   if (run.status !== 'success') console.log('  Some searches failed or were not saved; see the lines above. The other results are saved.');
   if (run.status === 'failed') process.exitCode = 1;

@@ -160,11 +160,12 @@ export function experienceFromLevel(level) {
   return hit ? { min: hit[1], max: null } : { min: null, max: null };
 }
 
-// The minimum years a job asks for, as a filter value: 'fresher', '1' ... '5', '6+' or 'unknown'.
+// The minimum years a job asks for, as a filter value: 'fresher', '1' ... '5', '5+' (more than 5 years,
+// i.e. 6 or more) or 'unknown'.
 export function experienceBand(min) {
   if (min == null) return 'unknown';
   if (min <= 0) return 'fresher';
-  if (min >= 6) return '6+';
+  if (min > 5) return '5+';
   return String(min);
 }
 

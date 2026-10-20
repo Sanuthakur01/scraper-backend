@@ -22,6 +22,21 @@ export function isExcludedCompany(name) {
   return Boolean(key) && excludedKeys.some((excluded) => key === excluded || key.startsWith(`${excluded} `));
 }
 
-// The minimum experience a job asks for must be within EXPERIENCE_MIN..EXPERIENCE_MAX years
-// (default 2..5): "3-6 yrs" is kept, "0-2 yrs", "1-3 yrs" and "6+ yrs" are not.
-export const experienceInRange = (min) => min != null && min >= config.experience.min && min <= config.experience.max;
+// The minimum experience a job asks for must be at least EXPERIENCE_MIN years (default 2), and at most
+// EXPERIENCE_MAX when that is set (no upper limit by default): "3-6 yrs" and "8+ yrs" are kept,
+// "0-2 yrs" and "1-3 yrs" are not.
+export const experienceInRange = (min) =>
+  min != null && min >= config.experience.min && (config.experience.max == null || min <= config.experience.max);
+
+// Why a job that fits a course is left out (a non-filtered job), from its details: the rules above, in
+// the order buildJob checks them. null = it passes them (a kept, filtered job).
+export function leftOutReason({ company, experienceMin }) {
+  if (isExcludedCompany(company)) return 'big-company';
+  if (experienceMin == null) return 'no-experience';
+  if (!experienceInRange(experienceMin)) return 'experience';
+  return null;
+}
+
+// "2+" (no upper limit) or "2-5", for messages.
+export const experienceRangeText = () =>
+  config.experience.max == null ? `${config.experience.min}+` : `${config.experience.min}-${config.experience.max}`;

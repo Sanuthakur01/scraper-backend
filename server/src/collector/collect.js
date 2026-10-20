@@ -20,8 +20,9 @@ import path from 'node:path';
 import mongoose from 'mongoose';
 import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
+import { experienceRangeText, leftOutReason } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
-import { CollectorRun, Job } from '../models.js';
+import { CollectorRun, Job, NonFilteredJob } from '../models.js';
 import { buildJob } from './buildJob.js';
 import { JobPool, listingFromJob, openingFromDoc } from './jobPool.js';
 
@@ -55,7 +56,8 @@ export function perSearch(fetchOne, concurrency, { retries = 1, retryDelayMs = 1
           const { runId, items } = await fetchOne(source, input);
           return { status: 'ok', runId, items, durationMs: Date.now() - started };
         } catch (err) {
-          if (attempt >= retries) return { status: 'error', items: [], error: err.message, durationMs: Date.now() - started };
+          // err.noRetry: a retry can't help (e.g. the Apify account is out of credit).
+          if (attempt >= retries || err.noRetry) return { status: 'error', items: [], error: err.message, durationMs: Date.now() - started };
           await sleep(retryDelayMs);
         }
       }
@@ -228,8 +230,9 @@ export function firstSeenDate(opening, now, backdateFrom = null) {
 
 // A new opening is inserted (with the id it was given in the pool); a stored one gets its new
 // listings and details. An opening first found by this run may also change its counting platform.
-export function writeOperation(opening, now, backdateFrom = null) {
-  const merged = Object.fromEntries(MERGED_FIELDS.map((f) => [f, opening[f]]));
+// extra: more fields to set (a non-filtered job's leftOutBy).
+export function writeOperation(opening, now, backdateFrom = null, extra = {}) {
+  const merged = { ...Object.fromEntries(MERGED_FIELDS.map((f) => [f, opening[f]])), ...extra };
   if (!opening.isNew) {
     const ownedByThisRun = opening.createdThisRun ? { primaryPlatform: opening.primaryPlatform, postedAt: opening.postedAt } : {};
     return { updateOne: { filter: { _id: opening._id }, update: { $set: { lastSeenAt: now, ...merged, ...ownedByThisRun } } } };
@@ -258,15 +261,16 @@ const duplicateKeyOnly = (err) => {
   return err?.code === 11000 || (errors.length > 0 && errors.every((e) => (e.code ?? e.err?.code) === 11000));
 };
 
-// Writes every opening with unsaved changes. Safe to repeat: inserts that already went through on an
-// earlier attempt come back as "duplicate key" and are treated as saved; updates set full values.
-async function writeTouched(pool, now, log) {
+// Writes every opening with unsaved changes to `model` (Job, or NonFilteredJob with extraOf giving
+// each one's leftOutBy). Safe to repeat: inserts that already went through on an earlier attempt come
+// back as "duplicate key" and are treated as saved; updates set full values.
+async function writeTouched(pool, now, log, model = Job, extraOf = () => ({})) {
   const touched = pool.openings.filter((o) => o.touched);
   if (!touched.length) return 0;
-  const operations = touched.map((opening) => writeOperation(opening, now, pool.backdateFrom));
+  const operations = touched.map((opening) => writeOperation(opening, now, pool.backdateFrom, extraOf(opening)));
   for (let attempt = 1; ; attempt++) {
     try {
-      await Job.bulkWrite(operations, { ordered: false });
+      await model.bulkWrite(operations, { ordered: false });
       break;
     } catch (err) {
       if (duplicateKeyOnly(err)) {
@@ -285,18 +289,18 @@ async function writeTouched(pool, now, log) {
   return touched.length;
 }
 
-async function loadRecentOpenings(pool, now) {
+async function loadRecentOpenings(pool, now, model = Job) {
   // Only jobs seen within the dedupe window are matched by company/title/city, so a company that
   // posts "Data Engineer, Pune" again next month counts as hiring again.
   const since = new Date(now.getTime() - config.dedupeWindowDays * DAY_MS);
-  for await (const doc of Job.find({ lastSeenAt: { $gte: since } }).lean().cursor()) pool.add(openingFromDoc(doc));
+  for await (const doc of model.find({ lastSeenAt: { $gte: since } }).lean().cursor()) pool.add(openingFromDoc(doc));
 }
 
 // The same platform listing (same listing id) is always the same job, however long ago it was saved.
-async function loadOpeningsForListings(pool, listings) {
+async function loadOpeningsForListings(pool, listings, model = Job) {
   const keys = [...new Set(listings.flatMap((l) => l.sourceKeys))].filter((key) => !pool.hasSourceKey(key));
   for (let i = 0; i < keys.length; i += 1000) {
-    const docs = await Job.find({ sourceKeys: { $in: keys.slice(i, i + 1000) } }).lean();
+    const docs = await model.find({ sourceKeys: { $in: keys.slice(i, i + 1000) } }).lean();
     for (const doc of docs) if (!pool.has(doc._id)) pool.add(openingFromDoc(doc));
   }
 }
@@ -304,8 +308,9 @@ async function loadOpeningsForListings(pool, listings) {
 // Cleans one platform's results, matches them against stored jobs and this run's other platforms,
 // and saves them. Platforms are saved one at a time (callers chain this), because they share the pool.
 // summary.queued = true once the jobs are in the pool: from then on a later save can still write them.
-// Jobs that don't state their experience go to `waiting` (see attachWaitingListings).
-async function savePlatform(searches, pool, now, log, summary, waiting) {
+// Jobs that don't state their experience go to `waiting` (see attachWaitingListings); jobs that fit a
+// course but are left out by the keep rules go to `leftOut` (see saveNonFiltered).
+async function savePlatform(searches, pool, now, log, summary, waiting, leftOut) {
   const counts = { fetched: 0, inIndia: 0, matched: 0, bigCompany: 0, outsideExperience: 0, noExperience: 0, kept: 0 };
   const listings = [];
   for (const search of searches) {
@@ -322,9 +327,10 @@ async function savePlatform(searches, pool, now, log, summary, waiting) {
       counts.inIndia++;
       if (result.skip === 'no-course') continue;
       counts.matched++;
-      if (result.skip === 'big-company') counts.bigCompany++;
-      else if (result.skip === 'experience') counts.outsideExperience++;
-      else if (result.job.experienceUnknown) {
+      if (result.skip === 'big-company' || result.skip === 'experience') {
+        counts[result.skip === 'big-company' ? 'bigCompany' : 'outsideExperience']++;
+        leftOut.push(listingFromJob(result.job));
+      } else if (result.job.experienceUnknown) {
         counts.noExperience++;
         waiting.push({ listing: listingFromJob(result.job), summary });
       } else {
@@ -350,21 +356,25 @@ async function savePlatform(searches, pool, now, log, summary, waiting) {
 }
 
 // After every platform is saved: a job that doesn't state its experience is kept only when it is the
-// same job as one that does state 2-5 years (on another platform, or stored earlier), so its link isn't
-// lost. Done at the end because the matching job may come from a platform that finished later.
-async function attachWaitingListings(waiting, pool, now, log) {
+// same job as one that does state its experience (on another platform, or stored earlier), so its link
+// isn't lost; the others are non-filtered jobs (leftOut). Done at the end because the matching job may
+// come from a platform that finished later.
+async function attachWaitingListings(waiting, pool, now, log, leftOut) {
   if (!waiting.length) return;
   await loadOpeningsForListings(pool, waiting.map((w) => w.listing));
   let attached = 0;
   for (const { listing, summary } of waiting) {
     const opening = pool.find(listing);
-    if (!opening) continue;
+    if (!opening) {
+      leftOut.push(listing);
+      continue;
+    }
     pool.merge(opening, listing);
     summary.noExperienceKept = (summary.noExperienceKept ?? 0) + 1;
     attached++;
   }
   await writeTouched(pool, now, log);
-  log(`  ${waiting.length} jobs didn't state their experience: ${attached} matched a 2-5 year job on another platform and were added to it, ${waiting.length - attached} left out.`);
+  log(`  ${waiting.length} jobs didn't state their experience: ${attached} matched a kept job on another platform and were added to it, ${waiting.length - attached} left out (non-filtered).`);
 }
 
 // A failed save leaves its jobs marked unsaved in the pool, so the next successful save writes them
@@ -379,11 +389,69 @@ function resolveEarlierFailures(summaries, log) {
   }
 }
 
+// ---------- Non-filtered jobs ----------
+
+// Saves the listings the keep rules left out (a big company, under the minimum experience, experience
+// not stated) as non-filtered jobs (NonFilteredJob), for the dashboard's Non-filtered switch. It runs
+// after the kept jobs are saved, so every kept job of this run is known, and never changes them.
+// Left-out listings are merged among themselves the same way as kept ones, and a listing is never in
+// both sets:
+//   - a left-out listing that is the same opening as a kept job is not added (alreadyKept);
+//   - a stored non-filtered job that is the same opening as a kept job of this run is removed
+//     (removedAsKept): the kept job wins. HR details typed into it move to the kept job when that has
+//     none; when both have some, both jobs stay.
+async function saveNonFiltered(leftOut, pool, now, log) {
+  const others = new JobPool();
+  others.backdateFrom = pool.backdateFrom;
+  const keptThisRun = pool.openings.filter((o) => o.seenThisRun);
+  await loadRecentOpenings(others, now, NonFilteredJob);
+  await loadOpeningsForListings(others, [...leftOut, ...keptThisRun], NonFilteredJob);
+  await loadOpeningsForListings(pool, leftOut); // stored kept jobs these may belong to
+
+  let alreadyKept = 0;
+  for (const listing of leftOut) {
+    if (pool.find(listing)) alreadyKept++;
+    else others.addListing(listing, () => new mongoose.Types.ObjectId());
+  }
+
+  const removeIds = [];
+  const moveManual = [];
+  for (const kept of keptThisRun) {
+    const twin = others.find(kept, (o) => !o.gone);
+    if (!twin || (twin.manual && kept.manual)) continue;
+    twin.gone = true;
+    twin.touched = false;
+    if (twin.isNew) continue; // first found by this run: simply not saved
+    removeIds.push(twin._id);
+    if (twin.manual) {
+      moveManual.push({ updateOne: { filter: { _id: kept._id, manual: { $exists: false } }, update: { $set: { manual: twin.manual } } } });
+    }
+  }
+
+  await writeTouched(others, now, log, NonFilteredJob, (o) => ({ leftOutBy: leftOutReason(o) }));
+  if (moveManual.length) await Job.bulkWrite(moveManual, { ordered: false });
+  if (removeIds.length) await NonFilteredJob.deleteMany({ _id: { $in: removeIds } });
+
+  const saved = others.openings.filter((o) => o.seenThisRun && !o.gone);
+  const result = {
+    inserted: saved.filter((o) => o.createdThisRun).length,
+    updated: saved.filter((o) => !o.createdThisRun).length,
+    alreadyKept,
+    removedAsKept: removeIds.length,
+  };
+  log(
+    `  ✓ Non-filtered: saved (${result.inserted} new, ${result.updated} already known; ${alreadyKept} left-out listings ` +
+      `were the same job as a kept one, ${removeIds.length} earlier non-filtered jobs are now kept jobs).`,
+  );
+  return result;
+}
+
 // ---------- The run ----------
 
-// The listing ids already stored for a platform ("LinkedIn:4479308872" -> "4479308872").
+// The listing ids already stored for a platform, kept or non-filtered ("LinkedIn:4479308872" -> "4479308872").
 async function storedListingIds(platform) {
-  const keys = await Job.distinct('sourceKeys', { sourceKeys: { $regex: `^${platform}:` } });
+  const query = { sourceKeys: { $regex: `^${platform}:` } };
+  const keys = [...(await Job.distinct('sourceKeys', query)), ...(await NonFilteredJob.distinct('sourceKeys', query))];
   return keys.filter((k) => k.startsWith(`${platform}:`)).map((k) => k.slice(platform.length + 1));
 }
 
@@ -403,6 +471,7 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
   if (lookbackDays > 1) pool.backdateFrom = new Date(now.getTime() - lookbackDays * DAY_MS);
   const summaries = [];
   const waiting = []; // jobs that don't state their experience (see attachWaitingListings)
+  const leftOut = []; // jobs that fit a course but the keep rules leave out (see saveNonFiltered)
 
   try {
     const sources = enabledSources(config.disabledSources);
@@ -441,10 +510,10 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
             rawFile,
           };
           try {
-            Object.assign(summary, await savePlatform(searches, pool, now, log, summary, waiting), { savedAt: new Date() });
+            Object.assign(summary, await savePlatform(searches, pool, now, log, summary, waiting, leftOut), { savedAt: new Date() });
             log(
               `  ✓ ${source.platform}: saved (${summary.newJobs} new, ${summary.knownJobs} already known; ` +
-                `left out: ${summary.bigCompany} big company, ${summary.outsideExperience} outside ${config.experience.min}-${config.experience.max} yrs)`,
+                `left out: ${summary.bigCompany} big company, ${summary.outsideExperience} outside ${experienceRangeText()} yrs)`,
             );
             resolveEarlierFailures(summaries, log);
           } catch (err) {
@@ -464,7 +533,7 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
     );
 
     try {
-      await attachWaitingListings(waiting, pool, now, log);
+      await attachWaitingListings(waiting, pool, now, log, leftOut);
     } catch (err) {
       log(`  Could not add the jobs without stated experience: ${err.message}`);
     }
@@ -479,11 +548,20 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
       }
     }
 
+    // The left-out jobs, kept apart as non-filtered jobs. A failure here doesn't touch the kept jobs.
+    let nonFiltered = {};
+    let nonFilteredError;
+    try {
+      nonFiltered = await saveNonFiltered(leftOut, pool, now, log);
+    } catch (err) {
+      nonFilteredError = err.message;
+      log(`  ✗ Non-filtered jobs: NOT SAVED - ${err.message}. The kept jobs are saved; "npm run replay" can add them later.`);
+    }
+
     // Old jobs are deleted, except ones someone typed HR details into.
-    const removed = await Job.deleteMany({
-      lastSeenAt: { $lt: new Date(now.getTime() - config.retentionDays * DAY_MS) },
-      manual: { $exists: false },
-    });
+    const old = { lastSeenAt: { $lt: new Date(now.getTime() - config.retentionDays * DAY_MS) }, manual: { $exists: false } };
+    const removed = await Job.deleteMany(old);
+    const removedNonFiltered = await NonFilteredJob.deleteMany(old);
     const sum = (key) => summaries.reduce((n, s) => n + (s[key] ?? 0), 0);
     const failedSearches = sum('failedSearches');
     const unsaved = summaries.filter((s) => s.saveError).length;
@@ -501,8 +579,12 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
       inserted: pool.openings.filter((o) => o.createdThisRun && !o.isNew).length,
       updated: pool.openings.filter((o) => o.seenThisRun && !o.createdThisRun).length,
       removedOld: removed.deletedCount ?? 0,
+      nonFiltered: { ...nonFiltered, removedOld: removedNonFiltered.deletedCount ?? 0 },
     };
-    await CollectorRun.updateOne({ _id: run._id }, { $set: { status, totals, platforms: summaries, finishedAt: new Date() } });
+    await CollectorRun.updateOne(
+      { _id: run._id },
+      { $set: { status, totals, platforms: summaries, finishedAt: new Date(), ...(nonFilteredError ? { nonFilteredError } : {}) } },
+    );
     return CollectorRun.findById(run._id).lean();
   } catch (err) {
     await CollectorRun.updateOne({ _id: run._id }, { $set: { status: 'failed', error: err.message, platforms: summaries, finishedAt: new Date() } });

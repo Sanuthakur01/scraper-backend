@@ -94,7 +94,9 @@ test('experience is read from text', () => {
   assert.deepEqual(parseExperience('Founded in 2024-25 years ago'), { min: null, max: null });
   assert.equal(experienceBand(0), 'fresher');
   assert.equal(experienceBand(4), '4');
-  assert.equal(experienceBand(7), '6+');
+  assert.equal(experienceBand(5), '5');
+  assert.equal(experienceBand(6), '5+', 'more than 5 years');
+  assert.equal(experienceBand(12), '5+');
   assert.equal(experienceBand(null), 'unknown');
 });
 

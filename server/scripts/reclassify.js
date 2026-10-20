@@ -1,75 +1,31 @@
-// Applies the current rules to jobs already stored, after any of these change:
+// Applies the current rules to the jobs already stored, kept and non-filtered (see src/reclassify.js),
+// after any of these change:
 //   - course rules (src/config/courses.js): a job moves to its new course, or is removed if it fits none
-//   - excluded companies (src/config/filters.js): their jobs are removed
-//   - experience range (EXPERIENCE_MIN / EXPERIENCE_MAX): jobs outside it, or without stated experience,
-//     are removed; each job's experience group is updated
-// Jobs someone typed HR details into on the dashboard are never removed (counted as "kept: HR details").
+//   - excluded companies (src/config/filters.js) or the experience range (EXPERIENCE_MIN / EXPERIENCE_MAX):
+//     kept jobs the rules now leave out move to the non-filtered jobs, and non-filtered jobs the rules
+//     now keep move to the kept jobs
+// Jobs someone typed HR details into are never removed; when they move, the details move with them.
 // Run with --dry-run to only print what would change.
-// Removed jobs can come back with `npm run replay` (raw results are kept 14 days) if the rules are relaxed.
-import { config } from '../src/config.js';
 import { connectDb, disconnectDb } from '../src/db.js';
-import { classifyTitle } from '../src/classify.js';
-import { experienceInRange, isExcludedCompany } from '../src/config/filters.js';
-import { experienceBand } from '../src/normalize.js';
-import { Job } from '../src/models.js';
+import { experienceRangeText } from '../src/config/filters.js';
+import { reclassifyJobs } from '../src/reclassify.js';
 
 const dryRun = process.argv.includes('--dry-run');
 
 await connectDb();
 try {
-  const counts = { moved: 0, noCourse: 0, bigCompany: 0, outsideExperience: 0, noExperience: 0, band: 0, kept: 0, keptManual: 0 };
-  const examples = { bigCompany: new Set(), outsideExperience: [] };
-  let ops = [];
-  const flush = async () => {
-    if (ops.length && !dryRun) await Job.bulkWrite(ops, { ordered: false });
-    ops = [];
-  };
-  const remove = (job, reason) => {
-    if (job.manual) {
-      counts.keptManual++;
-      return;
-    }
-    counts[reason]++;
-    ops.push({ deleteOne: { filter: { _id: job._id } } });
-  };
-
-  const fields = { title: 1, company: 1, course: 1, experienceMin: 1, experienceMax: 1, experienceBand: 1, manual: 1 };
-  for await (const job of Job.find({}, fields).lean().cursor()) {
-    const course = classifyTitle(job.title);
-    if (!course) remove(job, 'noCourse');
-    else if (isExcludedCompany(job.company)) {
-      remove(job, 'bigCompany');
-      examples.bigCompany.add(job.company);
-    } else if (job.experienceMin == null) remove(job, 'noExperience');
-    else if (!experienceInRange(job.experienceMin)) {
-      remove(job, 'outsideExperience');
-      if (examples.outsideExperience.length < 4) examples.outsideExperience.push(`"${job.title}" (${job.experienceMin}${job.experienceMax != null ? `-${job.experienceMax}` : '+'} yrs)`);
-    } else {
-      counts.kept++;
-      const set = {};
-      if (course !== job.course) {
-        set.course = course;
-        counts.moved++;
-      }
-      const band = experienceBand(job.experienceMin);
-      if (band !== job.experienceBand) {
-        set.experienceBand = band;
-        counts.band++;
-      }
-      if (Object.keys(set).length) ops.push({ updateOne: { filter: { _id: job._id }, update: { $set: set } } });
-    }
-    if (ops.length >= 500) await flush();
-  }
-  await flush();
-
-  const removed = counts.noCourse + counts.bigCompany + counts.outsideExperience + counts.noExperience;
-  console.log(`${dryRun ? 'Dry run - would remove' : 'Removed'} ${removed} jobs:`);
-  console.log(`  ${counts.bigCompany} at excluded big companies${counts.bigCompany ? ` (${[...examples.bigCompany].slice(0, 8).join(', ')}${examples.bigCompany.size > 8 ? ', …' : ''})` : ''}`);
-  console.log(`  ${counts.outsideExperience} asking for experience outside ${config.experience.min}-${config.experience.max} years${examples.outsideExperience.length ? `, e.g. ${examples.outsideExperience.join('; ')}` : ''}`);
-  console.log(`  ${counts.noExperience} that don't state their experience`);
-  console.log(`  ${counts.noCourse} that no longer match any course`);
-  console.log(`Kept ${counts.kept} jobs (${counts.moved} moved to another course, ${counts.band} experience groups updated).`);
-  if (counts.keptManual) console.log(`Also kept ${counts.keptManual} jobs that no longer fit the rules, because HR details were typed in for them.`);
+  const { counts: c, examples } = await reclassifyJobs({ dryRun });
+  const would = dryRun ? 'would ' : '';
+  const toNonFiltered = Object.values(c.toNonFiltered).reduce((a, b) => a + b, 0);
+  console.log(`${dryRun ? 'Dry run: ' : ''}rules: excluded companies, at least ${experienceRangeText()} years' experience, a course match.`);
+  console.log(`  Filtered (kept) jobs: ${c.kept} stay; ${toNonFiltered} ${would}move to Non-filtered` +
+    `${toNonFiltered ? ` (${c.toNonFiltered['big-company']} big company, ${c.toNonFiltered.experience} under the minimum experience, ` +
+      `${c.toNonFiltered['no-experience']} experience not stated)` : ''}${examples.toNonFiltered.length ? `, e.g. ${examples.toNonFiltered.join('; ')}` : ''}`);
+  console.log(`  Non-filtered jobs: ${c.nonFiltered} stay; ${c.toKept} ${would}move to Filtered${examples.toKept.length ? `, e.g. ${examples.toKept.join('; ')}` : ''}`);
+  console.log(`  ${c.noCourse} jobs that no longer match any course ${would}${dryRun ? 'be ' : ''}removed.`);
+  console.log(`  ${c.courseChanged} ${would}move to another course, ${c.bandChanged} experience groups ${would}${dryRun ? 'be ' : ''}updated.`);
+  if (c.keptManual) console.log(`  Also kept ${c.keptManual} jobs that fit no course, because HR details were typed in for them.`);
+  if (c.moveFailed) console.log(`  ${c.moveFailed} jobs could not move (the other set already has one of their listings) and stayed where they were.`);
   if (dryRun) console.log('Nothing changed. Run without --dry-run to apply.');
 } finally {
   await disconnectDb();

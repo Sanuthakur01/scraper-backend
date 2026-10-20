@@ -69,6 +69,9 @@ function runPython(python, args, { cwd, timeoutMs, onLog, label }) {
       clearTimeout(timer);
       running.delete(child);
       // Results printed before a timeout or crash are kept.
+      if (!problem && code && PROFILE_IN_USE.test(stderrTail)) {
+        problem = `${label}'s Chrome profile is open in another Chrome window (left from a login or an earlier run). Close that window and run again`;
+      }
       resolve({ code, stdout, problem: problem || (code ? `exit code ${code}: ${stderrTail.trim().split('\n').pop()}` : '') });
     });
   });
@@ -82,8 +85,12 @@ export function readSavedFeed(file, keyword, feedDir) {
   return saved[keyword]?.items ?? [];
 }
 
-// The site refused us for asking too often (HTTP 429): retrying soon would be refused again.
-const RATE_LIMITED = /ratelimited|http 429|too many requests/i;
+// The site refused us for asking too often (HTTP 429) or is blocking us for a while (HTTP 403):
+// retrying soon would be refused again.
+const RATE_LIMITED = /ratelimited|http 429|too many requests|http 403/i;
+
+// Chrome refuses to open a profile another Chrome window is using (e.g. a `--login` window left open).
+const PROFILE_IN_USE = /ProcessSingleton|user data directory is already in use|profile (?:directory )?is (?:already )?in use/i;
 
 // fetchSearches(source, inputs) for the collector: runs source.feedScript for all inputs (one Python
 // process), retries the failed ones once, and returns one result per input. After a rate-limit error
@@ -106,7 +113,8 @@ export function createScraperFeedFetcher(
     const run = (keywords) =>
       runPython(pythonPath, [script, '--days', String(days), '--limit', String(limit), ...(headless ? ['--headless'] : []), ...keywords], {
         cwd: dir,
-        timeoutMs: timeoutMinutes * 60_000,
+        // SCRAPER_TIMEOUT_MINUTES, or longer for a platform that needs it (source.minTimeoutMinutes).
+        timeoutMs: Math.max(timeoutMinutes, source.minTimeoutMinutes ?? 0) * 60_000,
         onLog: (line) => log(`    ${line}`),
         label: source.platform,
       });
@@ -122,7 +130,7 @@ export function createScraperFeedFetcher(
       const delayMs = rateLimited ? rateLimitDelayMs : retryDelayMs;
       log(
         `    [${source.platform.toLowerCase()}] retrying ${failed.length} failed search(es) in ${Math.round(delayMs / 1000)}s` +
-          (rateLimited ? ` (${source.platform} is limiting how often we can ask, so waiting longer)` : ''),
+          (rateLimited ? ` (${source.platform} is limiting how often we can ask, so waiting longer)` : first.problem ? ` (${first.problem})` : ''),
       );
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       const second = await run(failed);

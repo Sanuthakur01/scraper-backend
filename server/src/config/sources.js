@@ -93,6 +93,9 @@ export const SOURCES = [
     platform: 'Indeed',
     via: 'scraper',
     feedScript: 'indeed_feed.py',
+    // Not logged in, Indeed takes about 8 pages per search term (72 in all), slower after each "too many
+    // requests": on 20 Oct 2026 that took over 30 minutes. Its scraper gets at least this long.
+    minTimeoutMinutes: 60,
     // in.indeed.com, newest first, posted in the last day. Items are the job objects Indeed embeds
     // in its search pages.
     // Indeed's fromage takes any number of days.

@@ -37,10 +37,11 @@ export const config = {
   apifyConcurrency: int(process.env.APIFY_CONCURRENCY, 3),
   retentionDays: int(process.env.RETENTION_DAYS, 90),
 
-  // Only jobs whose minimum experience is within this range are kept.
+  // Only jobs whose minimum experience is within this range are kept. max null (the default): no upper
+  // limit, so jobs asking for 5+ years are kept too.
   experience: {
     min: int(process.env.EXPERIENCE_MIN, 2),
-    max: int(process.env.EXPERIENCE_MAX, 5),
+    max: int(process.env.EXPERIENCE_MAX, null),
   },
 
   dedupeWindowDays: int(process.env.DEDUPE_WINDOW_DAYS, 14),
