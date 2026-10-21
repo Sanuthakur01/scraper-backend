@@ -21,6 +21,7 @@ function mergeManual(keep, other) {
     phone: keep.phone || other.phone || '',
     phoneKeys: (keep.phone ? keep.phoneKeys : other.phoneKeys) ?? [],
     email: keep.email || other.email || '',
+    assignedTo: [...new Set([...(keep.assignedTo ?? []), ...(other.assignedTo ?? [])])], // both copies' students
     remarks: [...new Set(remarks)].join('\n'),
     updatedAt: keep.updatedAt > other.updatedAt ? keep.updatedAt : other.updatedAt,
   };

@@ -116,7 +116,7 @@ function jobFilter(query, { start, end }) {
   const search = String(query.q ?? '').trim();
   if (search) {
     const rx = new RegExp(escapeRegex(search), 'i');
-    filter.$or = [{ title: rx }, { company: rx }];
+    filter.$or = [{ title: rx }, { company: rx }, { 'manual.assignedTo': rx }]; // a student's name finds the jobs assigned to them
   }
   return filter;
 }
@@ -555,7 +555,9 @@ router.get('/jobs', wrap(async (req, res) => {
   const pageSize = Math.min(clampDays(req.query.limit, 25, 100), 100);
   const page = clampDays(req.query.page, 1, 100_000);
   // withContact: how many of these jobs have an HR phone, email or note (typed in, or found in the post).
-  const hasContact = { $or: [{ manual: { $exists: true } }, { 'foundPhones.0': { $exists: true } }, { 'foundEmails.0': { $exists: true } }] };
+  // An HR phone, email or note (typed in, or found in the posting). Students assigned alone don't count.
+  const typed = (field) => ({ [`manual.${field}`]: { $nin: [null, ''] } });
+  const hasContact = { $or: [typed('phone'), typed('email'), typed('remarks'), { 'foundPhones.0': { $exists: true } }, { 'foundEmails.0': { $exists: true } }] };
   const [items, total, withContact] = await Promise.all([
     J.find(filter, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
     J.countDocuments(filter),
@@ -626,7 +628,7 @@ router.get('/jobs.csv', wrap(async (req, res) => {
   const nonFiltered = req.query.view === 'nonfiltered';
   const header = [
     'First seen (IST)', 'Posted (IST)', 'Course', 'Title', 'Company', 'Cities', 'Experience', 'Salary', 'Listed on',
-    'Phone', 'Email', 'Remarks', ...(nonFiltered ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
+    'Phone', 'Email', 'Assigned to', 'Remarks', ...(nonFiltered ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
   ];
   const lines = jobs.map(jobRow).map((job) =>
     [
@@ -641,6 +643,7 @@ router.get('/jobs.csv', wrap(async (req, res) => {
       (job.platforms ?? []).join('; '),
       job.contact.phone,
       job.contact.email,
+      job.contact.assignedTo.join('; '),
       job.contact.remarks,
       ...(nonFiltered ? [LEFT_OUT_REASONS[job.leftOutBy] ?? ''] : []),
       ...platforms.map((p) => job.links?.[p] ?? ''),

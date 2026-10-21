@@ -27,12 +27,20 @@ const jobSchema = new mongoose.Schema(
     // Contact details written in the postings themselves. Only the collector changes these.
     foundPhones: [String], // "+91 98765 43210"
     foundEmails: [String],
-    // HR contact typed in on the dashboard (api/followUp.js). Only the dashboard changes this, so a
-    // collection never overwrites it. Shown instead of the found phone/email. Absent = nothing entered.
+    // HR contact and the students the job is assigned to, typed in on the dashboard (api/followUp.js).
+    // Only the dashboard changes this, so a collection never overwrites it, and a job with it is never
+    // removed by the cleanup. Shown instead of the found phone/email. Absent = nothing entered.
     // phoneKeys: the phone number(s) as bare digits (see phoneKey), so a number can't be entered twice.
     manual: {
       type: new mongoose.Schema(
-        { phone: String, phoneKeys: { type: [String], default: undefined }, email: String, remarks: String, updatedAt: Date },
+        {
+          phone: String,
+          phoneKeys: { type: [String], default: undefined },
+          email: String,
+          remarks: String,
+          assignedTo: { type: [String], default: undefined }, // students this job is assigned to
+          updatedAt: Date,
+        },
         { _id: false },
       ),
       default: undefined,

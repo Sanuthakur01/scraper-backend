@@ -1,6 +1,7 @@
-// The HR contact the team records by hand for a job: phone, email and remarks, in the `manual` field,
-// which only the dashboard writes, so a collection never overwrites it. The collector also finds
-// contacts written in the postings (foundPhones, foundEmails); what was typed in is shown instead.
+// What the team records by hand for a job: HR phone, email, remarks and the students it is assigned
+// to, in the `manual` field, which only the dashboard writes, so a collection never overwrites it. The
+// collector also finds contacts written in the postings (foundPhones, foundEmails); what was typed in
+// is shown instead.
 // A phone number can be typed in only if no other job has it yet (findPhoneOwner).
 
 import { Job, NonFilteredJob } from '../models.js';
@@ -10,6 +11,9 @@ export const PHONE_EXISTS = 'This number already exists.';
 
 // Phone numbers, and email addresses, a job can have typed in (the dashboard has a box for each).
 export const MAX_ENTRIES = 5;
+// Students a job can be assigned to (one box each), and the longest name.
+export const MAX_STUDENTS = 20;
+const NAME_LIMIT = 60;
 const REMARKS_LIMIT = 1000;
 const EMAIL_LIMIT = 120; // one address
 const EMAIL = /^[^\s@,;]+@[^\s@,;]+\.[a-z]{2,}$/i;
@@ -28,7 +32,15 @@ export function contactView({ foundPhones, foundEmails, manual }) {
     typed ? [typed, 'manual'] : found?.length ? [found.join(', '), 'posting'] : ['', null];
   const [phone, phoneSource] = pick(manual?.phone, foundPhones);
   const [email, emailSource] = pick(manual?.email, foundEmails);
-  return { phone, phoneSource, email, emailSource, remarks: manual?.remarks ?? '', updatedAt: manual?.updatedAt ?? null };
+  return {
+    phone,
+    phoneSource,
+    email,
+    emailSource,
+    remarks: manual?.remarks ?? '',
+    assignedTo: manual?.assignedTo ?? [],
+    updatedAt: manual?.updatedAt ?? null,
+  };
 }
 
 // A stored job as the API sends it: the typed-in and found contact fields replaced by `contact`.
@@ -37,7 +49,7 @@ export const jobRow = ({ foundPhones, foundEmails, manual, ...job }) => ({
   contact: contactView({ foundPhones, foundEmails, manual }),
 });
 
-// Checks what was typed in. Returns { value: { phone, phoneKeys, email, remarks } } or { error: 'message' }.
+// Checks what was typed in. Returns { value: { phone, phoneKeys, email, remarks, assignedTo } } or { error: 'message' }.
 // Up to MAX_ENTRIES phone numbers and as many email addresses, each sent in its own box (a list) or
 // separated by commas; they are stored as one comma-separated text ("98765 43210, 080 4123 4567").
 // The same number or address twice is kept once. A wrong entry is named in the message. Empty = nothing entered.
@@ -61,15 +73,22 @@ export function parseFollowUpInput(body) {
   const emails = typedEmails.filter((e, i) => typedEmails.findIndex((f) => f.toLowerCase() === e.toLowerCase()) === i);
   if (emails.length > MAX_ENTRIES) return { error: `Email: at most ${MAX_ENTRIES} addresses per job.` };
 
-  return { value: { phone: phones.join(', '), phoneKeys: phones.map(phoneKey), email: emails.join(', '), remarks } };
+  // Students the job is assigned to: one name per box (or separated by commas), each name once.
+  const typedNames = entriesOf(body.assignedTo, /[,;\n]/);
+  const longName = typedNames.find((n) => n.length > NAME_LIMIT);
+  if (longName) return { error: `Assign to: "${clip(longName)}" is too long for a name (at most ${NAME_LIMIT} characters).` };
+  const assignedTo = typedNames.filter((n, i) => typedNames.findIndex((m) => m.toLowerCase() === n.toLowerCase()) === i);
+  if (assignedTo.length > MAX_STUDENTS) return { error: `Assign to: at most ${MAX_STUDENTS} students per job.` };
+
+  return { value: { phone: phones.join(', '), phoneKeys: phones.map(phoneKey), email: emails.join(', '), remarks, assignedTo } };
 }
 
 const clip = (text) => (text.length > 40 ? `${text.slice(0, 40)}…` : text);
 
 // The `manual` field to store from what was typed in, or null when nothing is entered (the field is removed).
-export function manualRecord({ phone, phoneKeys, email, remarks }, now) {
-  if (!phone && !email && !remarks) return null;
-  return { phone, phoneKeys, email, remarks, updatedAt: now };
+export function manualRecord({ phone, phoneKeys, email, remarks, assignedTo = [] }, now) {
+  if (!phone && !email && !remarks && !assignedTo.length) return null;
+  return { phone, phoneKeys, email, remarks, ...(assignedTo.length ? { assignedTo } : {}), updatedAt: now };
 }
 
 // Every phone number a stored job has, as phoneKeys: typed in, and found in its postings.

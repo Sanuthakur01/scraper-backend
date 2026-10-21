@@ -131,8 +131,8 @@ test('HR phone, email and remarks can be typed in for a job, and are shown inste
   assert.deepEqual([contact.phone, contact.phoneSource, contact.email, contact.emailSource], ['+91 70000 12345', 'manual', 'careers@company2.in', 'posting']);
 
   const csv = await (await fetch(`${base}/jobs.csv?days=1`)).text();
-  assert.match(csv.split('\r\n')[0], /Listed on,Phone,Email,Remarks,/);
-  assert.match(csv, /98765 43210,"hr@company1.com, anil@company1.com",Called; send CVs Monday/);
+  assert.match(csv.split('\r\n')[0], /Listed on,Phone,Email,Assigned to,Remarks,/);
+  assert.match(csv, /98765 43210,"hr@company1.com, anil@company1.com",,Called; send CVs Monday/);
 
   // Clearing everything removes the typed-in details.
   contact = (await (await put(job1._id, { phone: '', email: '', remarks: '' })).json()).contact;
@@ -197,6 +197,40 @@ test('several phone numbers and emails, one per box: up to 5 each, kept once, a 
   assert.equal(parseFollowUpInput({ phone: six.slice(0, 5) }).value.phoneKeys.length, 5);
   assert.equal(parseFollowUpInput({ phone: six }).error, 'Phone: at most 5 numbers per job.');
   assert.equal(parseFollowUpInput({ email: six.map((_, i) => `hr${i}@acme.in`) }).error, 'Email: at most 5 addresses per job.');
+});
+
+test('a job can be assigned to several students: saved, shown, searched, in the CSV, not counted as HR details', async () => {
+  const parsed = parseFollowUpInput({ assignedTo: ['Riya Sharma', '', ' Aman  Gupta ', 'riya sharma'] }).value;
+  assert.deepEqual(parsed.assignedTo, ['Riya Sharma', 'Aman Gupta'], 'trimmed, empty boxes ignored, each name once');
+  assert.match(parseFollowUpInput({ assignedTo: ['x'.repeat(61)] }).error, /^Assign to: ".*" is too long for a name/);
+  assert.equal(parseFollowUpInput({ assignedTo: Array.from({ length: 21 }, (_, i) => `Student ${i}`) }).error, 'Assign to: at most 20 students per job.');
+
+  const job1 = await Job.findOne({ fingerprint: 'f1' }).lean();
+  const put = (body) =>
+    fetch(`${base}/jobs/${job1._id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const list = async (q = '') => (await fetch(`${base}/jobs?days=1&limit=100${q}`)).json();
+  const before = (await list()).withContact;
+
+  const saved = await put({ phone: [], email: [], remarks: '', assignedTo: ['Riya Sharma', 'Aman Gupta'] });
+  assert.equal(saved.status, 200);
+  assert.deepEqual((await saved.json()).contact.assignedTo, ['Riya Sharma', 'Aman Gupta']);
+  assert.deepEqual((await Job.findById(job1._id).lean()).manual.assignedTo, ['Riya Sharma', 'Aman Gupta'], 'stored');
+  assert.equal((await list()).withContact, before, 'students alone are not HR details');
+
+  const found = await list('&q=aman');
+  assert.deepEqual(found.items.map((j) => j.title), ['Data Analyst 1'], "searching a student's name finds the jobs assigned to them");
+
+  const csv = await (await fetch(`${base}/jobs.csv?days=1`)).text();
+  assert.match(csv.split('\r\n')[0], /Phone,Email,Assigned to,Remarks/);
+  assert.match(csv, /Riya Sharma; Aman Gupta/);
+
+  // Other details saved later keep the students only if they are sent again (the dashboard always sends them).
+  await put({ phone: [], email: [], remarks: 'Called', assignedTo: ['Riya Sharma'] });
+  assert.deepEqual((await Job.findById(job1._id).lean()).manual.assignedTo, ['Riya Sharma']);
+  assert.equal((await list()).withContact, before + 1, 'a note counts');
+
+  await put({ phone: [], email: [], remarks: '', assignedTo: [] });
+  assert.equal((await Job.findById(job1._id).lean()).manual, undefined, 'nothing left: removed');
 });
 
 test('a second number already on another job is refused, naming that number', async () => {
