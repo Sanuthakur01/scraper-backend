@@ -8,10 +8,23 @@ import { MongoMemoryServer } from 'mongodb-memory-server-core';
 import { config } from '../src/config.js';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
-import { CollectorRun, Job, NonFilteredJob } from '../src/models.js';
+import { Activity, CollectorRun, Job, NonFilteredJob } from '../src/models.js';
 import { parseFollowUpInput } from '../src/api/followUp.js';
 import { COURSES } from '../src/config/courses.js';
 import { SKILL_NAMES } from '../src/normalize.js';
+import { AuthError, createClerkIdentify } from '../src/auth.js';
+import { roleFrom } from '../src/config/access.js';
+
+// Stand-in for the Clerk sign-in check (src/auth.js), so tests never call Clerk: no Authorization
+// header is a signed-in admin; "Bearer <role>:<email>" signs in that person; "Bearer expired" is refused.
+const TESTER = { userId: 'user_tester', email: 'tester@example.com', name: 'Test Admin', role: 'ADMIN' };
+async function fakeIdentify(req) {
+  const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+  if (!token) return TESTER;
+  if (token === 'expired') throw new AuthError(401, 'Your sign-in has expired. Reload the page, then try again.');
+  const [role, email] = token.split(':');
+  return { userId: `user_${email}`, email, name: '', role: roleFrom({ role }) };
+}
 
 const HOUR = 3_600_000;
 let mongo;
@@ -41,7 +54,7 @@ before(async () => {
     job(3, { primaryPlatform: 'Naukri', platforms: ['Naukri'], postedAt: null, experienceMin: 2, experienceBand: '2', cities: ['Remote'], isRemote: true }),
     job(4, { course: 'data-science', primaryPlatform: 'Indeed', platforms: ['Indeed'], postedAt: new Date(now - 2 * HOUR) }),
   ]);
-  server = createApp().listen(0);
+  server = createApp({ identify: fakeIdentify }).listen(0);
   base = `http://localhost:${server.address().port}/api`;
 });
 
@@ -285,37 +298,30 @@ test('every skill a course teaches is one the collector looks for', () => {
 const putFollowUp = (id, body) =>
   fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
-test('weekly report: the last 7 days per course, top companies by employer, real cities, and no comparison without a full earlier week', async () => {
+test('the 7-day comparison appears only once every day of both weeks was collected', async () => {
   const now = Date.now();
   const acme = (n, company) => ({
     fingerprint: `acme${n}`, title: `BI Analyst ${n}`, company, course: 'data-analyst', cities: n === 1 ? ['Pune'] : ['India (city not stated)'],
     firstSeenAt: new Date(now - 3 * HOUR), lastSeenAt: new Date(now - 3 * HOUR), sourceKeys: [`AC:${n}`],
     primaryPlatform: 'LinkedIn', platforms: ['LinkedIn'], skills: ['SQL', 'Power BI'],
   });
+  // One employer spelled two ways (the hiring partners test below counts them as one).
   await Job.create([acme(1, 'Acme Analytics Pvt Ltd'), acme(2, 'Acme Analytics')]);
+  const week = async () => (await fetch(`${base}/summary?days=7`)).json();
 
-  let report = await (await fetch(`${base}/report`)).json();
-  const analyst = report.courses.find((c) => c.id === 'data-analyst');
-  const summary = await (await fetch(`${base}/summary?days=7`)).json();
-  assert.equal(analyst.count, summary.current['data-analyst'], 'same count as the dashboard tile for 7 days');
-  assert.equal(report.total, Object.values(summary.current).reduce((a, b) => a + b, 0));
-  assert.equal(report.comparable, false, 'collection started inside the earlier week');
-  assert.equal(analyst.previous, null);
-  assert.deepEqual(analyst.skills.slice(0, 2), ['Power BI', 'SQL']);
-  assert.deepEqual(report.companies[0], { name: 'Acme Analytics', count: 2 }, 'both spellings are one employer, shown by the shorter one');
-  assert.ok(report.cities.every((c) => c.name !== 'India (city not stated)' && c.name !== 'Remote'));
-  assert.ok(report.from && report.to && report.brand && report.lastRefreshed);
+  let summary = await week();
+  assert.equal(summary.comparable, false, 'collection started inside the earlier week');
+  assert.deepEqual(summary.previous, {});
 
   // Daily collection began 20 days ago, with a run every day of the last two weeks.
   await CollectorRun.create({ startedAt: new Date(now - 20 * 24 * HOUR), finishedAt: new Date(now - 20 * 24 * HOUR), status: 'success' });
-  report = await (await fetch(`${base}/report`)).json();
-  assert.equal(report.comparable, false, 'one early run is not daily collection');
+  summary = await week();
+  assert.equal(summary.comparable, false, 'one early run is not daily collection');
   await CollectorRun.create(
     Array.from({ length: 14 }, (_, k) => ({ startedAt: new Date(now - k * 24 * HOUR), finishedAt: new Date(now - k * 24 * HOUR), status: 'success' })),
   );
-  report = await (await fetch(`${base}/report`)).json();
-  assert.equal(report.comparable, true);
-  assert.equal(report.courses.find((c) => c.id === 'data-analyst').previous, 0);
+  summary = await week();
+  assert.equal(summary.comparable, true);
 });
 
 test('hiring partners: employers with 2+ openings and their HR contacts', async () => {
@@ -345,7 +351,7 @@ test('a dashboard hosted elsewhere can use the API only if its address is in COR
 
   const saved = config.corsOrigins;
   config.corsOrigins = [dashboard];
-  const server2 = createApp().listen(0);
+  const server2 = createApp({ identify: fakeIdentify }).listen(0);
   try {
     const api = `http://localhost:${server2.address().port}/api`;
     const preflight = await fetch(`${api}/jobs/0123456789abcdef01234567/follow-up`, {
@@ -369,23 +375,23 @@ test('a dashboard hosted elsewhere can use the API only if its address is in COR
 });
 
 test('dashboard pages answer GET and HEAD, with or without a trailing slash', async () => {
-  // A stand-in for the built dashboard: the build has a folder named like each page (report/), which
-  // must not hide the page itself (report.html). The dashboard's links send HEAD /report/ before
-  // prefetching a page.
+  // A stand-in for the built dashboard: the build has a folder named like each page (performance/),
+  // which must not hide the page itself (performance.html). The dashboard's links send HEAD
+  // /performance/ before prefetching a page.
   const root = await mkdtemp(path.join(os.tmpdir(), 'ijf-out-'));
   const out = path.join(root, 'client', 'out');
-  await mkdir(path.join(out, 'report'), { recursive: true });
-  await writeFile(path.join(out, 'report.html'), '<p>report</p>');
+  await mkdir(path.join(out, 'performance'), { recursive: true });
+  await writeFile(path.join(out, 'performance.html'), '<p>performance</p>');
   await writeFile(path.join(out, 'index.html'), '<p>home</p>');
   const saved = config.rootDir;
   config.rootDir = root;
-  const server2 = createApp().listen(0);
+  const server2 = createApp({ identify: fakeIdentify }).listen(0);
   try {
     const site = `http://localhost:${server2.address().port}`;
-    for (const url of ['/report', '/report/']) {
+    for (const url of ['/performance', '/performance/']) {
       const page = await fetch(site + url);
       assert.equal(page.status, 200, `GET ${url}`);
-      assert.equal(await page.text(), '<p>report</p>');
+      assert.equal(await page.text(), '<p>performance</p>');
       assert.equal((await fetch(site + url, { method: 'HEAD' })).status, 200, `HEAD ${url}`);
     }
     assert.equal((await fetch(`${site}/no-such-page`, { method: 'HEAD' })).status, 200, 'other addresses get the dashboard, as with GET');
@@ -476,7 +482,7 @@ test('every number on a chart opens a list holding exactly those jobs', async ()
 test('the Non-filtered view shows only the non-filtered jobs, and the Filtered view is exactly as before', async () => {
   const get = async (path) => (await fetch(`${base}/${path}`)).json();
   const filteredPaths = ['meta', 'summary?days=7', 'platforms?days=7', 'trends?days=30', 'insights?days=7', 'course/data-analyst?days=7',
-    'skill-gaps?course=data-analyst&days=7', 'report', 'partners', 'jobs?days=30&limit=100'];
+    'skill-gaps?course=data-analyst&days=7', 'partners', 'jobs?days=30&limit=100'];
   const before = await Promise.all(filteredPaths.map(get));
 
   const now = Date.now();
@@ -561,4 +567,308 @@ test('the job list says how many of its jobs have an HR contact', async () => {
   assert.equal(await count(), 1, 'a typed-in note counts');
   await Job.updateOne({ _id: job._id }, { $unset: { manual: 1 }, $set: { foundEmails: ['hr@countco.in'] } });
   assert.equal(await count(), 1, 'an email found in the post counts too');
+});
+
+const putAs = (id, body, auth) =>
+  fetch(`${base}/jobs/${id}/follow-up`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: `Bearer ${auth}` } : {}) },
+    body: JSON.stringify(body),
+  });
+const empty = { phone: [], email: [], assignedTo: [], remarks: '' };
+
+test('every change to HR details is recorded: who (email), which job, and what was added, edited or removed', async () => {
+  const job = await Job.findOne({ fingerprint: 'f1' }).lean();
+  await putAs(job._id, empty); // start from nothing typed in
+  await Activity.deleteMany({});
+  const riya = 'PLACEMENT_STAFF:riya@example.com';
+
+  // Added: a phone and an email.
+  assert.equal((await putAs(job._id, { ...empty, phone: ['93456 70011'], email: ['hr@acme.in'] }, riya)).status, 200);
+  let [entry] = await Activity.find().sort({ at: -1 }).lean();
+  assert.deepEqual(entry.actor, { userId: 'user_riya@example.com', email: 'riya@example.com', name: '', role: 'PLACEMENT_STAFF' });
+  assert.equal(entry.action, 'added');
+  assert.deepEqual({ id: String(entry.job.id), set: entry.job.set, title: entry.job.title }, { id: String(job._id), set: 'filtered', title: job.title });
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added]), [['phone', 'added', ['93456 70011']], ['email', 'added', ['hr@acme.in']]]);
+
+  // Edited: a second number, the email removed, a student and a note added.
+  await putAs(job._id, { phone: ['93456 70011', '080 5555 0101'], email: [], assignedTo: ['Riya Sharma'], remarks: 'Called HR' }, 'ADMIN:aman@example.com');
+  [entry] = await Activity.find().sort({ at: -1 }).lean();
+  assert.equal(entry.actor.email, 'aman@example.com');
+  assert.equal(entry.action, 'edited');
+  const byField = Object.fromEntries(entry.changes.map((c) => [c.field, c]));
+  assert.deepEqual([byField.phone.change, byField.phone.added, byField.phone.removed], ['edited', ['080 5555 0101'], []]);
+  assert.deepEqual([byField.email.change, byField.email.before, byField.email.after], ['removed', ['hr@acme.in'], []]);
+  assert.deepEqual([byField.assignedTo.change, byField.remarks.change, byField.remarks.after], ['added', 'added', ['Called HR']]);
+
+  // Saving it again as it is: nothing changed, nothing recorded. Refused saves aren't recorded either.
+  const count = await Activity.countDocuments();
+  await putAs(job._id, { phone: ['93456 70011', '080 5555 0101'], email: [], assignedTo: ['Riya Sharma'], remarks: 'Called HR' }, riya);
+  assert.equal((await putAs(job._id, { ...empty, phone: ['98450 12345'] }, riya)).status, 409, "a number in another job's posting");
+  assert.equal((await putAs(job._id, { ...empty, phone: ['12345'] }, riya)).status, 400);
+  assert.equal(await Activity.countDocuments(), count, 'no record without a change');
+
+  // Removed: everything cleared.
+  await putAs(job._id, empty, riya);
+  [entry] = await Activity.find().sort({ at: -1 }).lean();
+  assert.equal(entry.action, 'removed');
+  assert.deepEqual(entry.changes.map((c) => c.field).sort(), ['assignedTo', 'phone', 'remarks']);
+
+  // Reading the record: newest first, by job, by person, page by page.
+  const get = async (q, auth) => fetch(`${base}/activity?${q}`, auth ? { headers: { Authorization: `Bearer ${auth}` } } : {});
+  const all = await (await get(`job=${job._id}`)).json();
+  assert.deepEqual(all.items.map((i) => i.action), ['removed', 'edited', 'added']);
+  assert.equal(all.next, null);
+  const mine = await (await get('email=RIYA@example.com')).json();
+  assert.deepEqual(mine.items.map((i) => i.action), ['removed', 'added'], 'email matched ignoring case');
+  const first = await (await get(`job=${job._id}&limit=1`)).json();
+  assert.equal(first.items.length, 1);
+  const second = await (await get(`job=${job._id}&limit=1&before=${encodeURIComponent(first.next)}`)).json();
+  assert.equal(second.items[0].action, 'edited');
+  assert.equal((await get('job=nope')).status, 400);
+  assert.equal((await get('', 'expired')).status, 401, 'reading it needs a sign-in too');
+  assert.equal((await get('', 'STUDENT:x@example.com')).status, 403);
+});
+
+test('the server accepts changes only from a Clerk sign-in with an allowed role, and takes the email from Clerk', async () => {
+  // The real check (src/auth.js) with its two calls to Clerk replaced: tokens "good-<userId>" are valid.
+  const users = {
+    user_ok: { firstName: 'Riya', lastName: 'Sharma', primaryEmailAddress: { emailAddress: 'riya@ijf.example' }, publicMetadata: { role: 'research_team' } },
+    user_norole: { primaryEmailAddress: { emailAddress: 'guest@ijf.example' }, publicMetadata: {} },
+  };
+  const identify = createClerkIdentify({
+    secretKey: 'sk_test_fake',
+    verify: async (token) => {
+      if (token.startsWith('good-')) return { sub: token.slice(5) };
+      throw Object.assign(new Error('JWT is expired'), { reason: 'token-expired' });
+    },
+    getUser: async (id) => users[id],
+  });
+  const server2 = createApp({ identify }).listen(0);
+  try {
+    const api = `http://localhost:${server2.address().port}/api`;
+    const job = await Job.findOne({ fingerprint: 'f1' }).lean();
+    const put = (auth, body) =>
+      fetch(`${api}/jobs/${job._id}/follow-up`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) },
+        body: JSON.stringify(body),
+      });
+    const before = await Activity.countDocuments();
+    const body = { ...empty, remarks: 'From the test', actor: { email: 'someone-else@example.com' } };
+
+    let res = await put(null, body);
+    assert.equal(res.status, 401);
+    assert.match((await res.json()).error, /sign in/i);
+    assert.equal((await put('Bearer stale', body)).status, 401, 'an expired or made-up token');
+    res = await put('Bearer good-user_norole', body);
+    assert.equal(res.status, 403, 'signed in, but no allowed role');
+    assert.match((await res.json()).error, /role/);
+    assert.equal(await Activity.countDocuments(), before, 'refused: nothing recorded');
+    assert.equal((await Job.findById(job._id).lean()).manual, undefined, 'refused: nothing saved');
+
+    assert.equal((await put('Bearer good-user_ok', body)).status, 200);
+    const [entry] = await Activity.find().sort({ at: -1 }).lean();
+    assert.deepEqual(
+      entry.actor,
+      { userId: 'user_ok', email: 'riya@ijf.example', name: 'Riya Sharma', role: 'RESEARCH_TEAM' },
+      'the email comes from Clerk, not from what the browser sent',
+    );
+    await put('Bearer good-user_ok', empty);
+
+    // A dashboard hosted elsewhere may send the sign-in header.
+    const saved = config.corsOrigins;
+    config.corsOrigins = ['https://dash.example.com'];
+    const server3 = createApp({ identify }).listen(0);
+    try {
+      const preflight = await fetch(`http://localhost:${server3.address().port}/api/jobs/${job._id}/follow-up`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://dash.example.com', 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'authorization,content-type' },
+      });
+      assert.match(preflight.headers.get('access-control-allow-headers'), /Authorization/);
+    } finally {
+      server3.close();
+      config.corsOrigins = saved;
+    }
+  } finally {
+    server2.close();
+  }
+});
+
+test('without CLERK_SECRET_KEY on the server, changes are refused with a clear message', async () => {
+  const server2 = createApp({ identify: createClerkIdentify({ secretKey: '' }) }).listen(0);
+  try {
+    const job = await Job.findOne({ fingerprint: 'f1' }).lean();
+    const res = await fetch(`http://localhost:${server2.address().port}/api/jobs/${job._id}/follow-up`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer anything' },
+      body: JSON.stringify({ ...empty, remarks: 'x' }),
+    });
+    assert.equal(res.status, 503);
+    assert.match((await res.json()).error, /CLERK_SECRET_KEY/);
+  } finally {
+    server2.close();
+  }
+});
+
+test('the activity list can be filtered (person, kind of change, job) and paged without skipping records', async () => {
+  await Activity.deleteMany({});
+  const [job1, job2] = await Promise.all(['f1', 'f2'].map((f) => Job.findOne({ fingerprint: f }).lean()));
+  const at = new Date();
+  const entry = (n, actor, action, job, when = at) => ({
+    at: when,
+    actor: { userId: `u_${actor}`, email: `${actor}@example.com`, name: actor === 'riya' ? 'Riya Sharma' : '', role: 'ADMIN' },
+    action,
+    job: { id: job._id, set: 'filtered', title: job.title, company: job.company, course: job.course },
+    changes: [{ field: 'remarks', change: action, before: [], after: [`note ${n}`], added: [], removed: [] }],
+  });
+  // Five records, three of them saved in the same millisecond.
+  await Activity.create([
+    entry(1, 'riya', 'added', job1, new Date(at.getTime() - 60_000)),
+    entry(2, 'riya', 'edited', job1),
+    entry(3, 'aman', 'edited', job2),
+    entry(4, 'riya', 'removed', job2),
+    entry(5, 'aman', 'added', job1, new Date(at.getTime() - 120_000)),
+  ]);
+  const get = async (q) => (await fetch(`${base}/activity?${q}`)).json();
+
+  const all = await get('');
+  assert.equal(all.total, 5);
+  assert.deepEqual(all.people, [{ email: 'riya@example.com', name: 'Riya Sharma', count: 3 }, { email: 'aman@example.com', name: '', count: 2 }]);
+  assert.equal((await get('action=edited')).total, 2);
+  assert.equal((await get(`q=${encodeURIComponent(job2.company)}`)).total, 2, 'by company');
+  assert.equal((await get('email=aman@example.com&action=added')).total, 1);
+
+  // Two at a time: every record exactly once, even the three saved in the same millisecond.
+  const seen = [];
+  let next = '';
+  do {
+    const page = await get(`limit=2${next ? `&before=${encodeURIComponent(next)}` : ''}`);
+    seen.push(...page.items.map((i) => i.changes[0].after[0]));
+    if (next) assert.equal(page.total, undefined, 'total and people only on the first page');
+    next = page.next;
+  } while (next);
+  assert.deepEqual(seen.slice(3), ['note 1', 'note 5']);
+  assert.deepEqual(seen.slice(0, 3).sort(), ['note 2', 'note 3', 'note 4']);
+  assert.equal((await fetch(`${base}/activity?before=nonsense`)).status, 400);
+  await Activity.deleteMany({});
+
+  // A record's job can be opened: the job list finds one job by id, whenever it was found.
+  const one = await (await fetch(`${base}/jobs?id=${job2._id}&days=1`)).json();
+  assert.deepEqual(one.items.map((j) => j._id), [String(job2._id)]);
+});
+
+test('a custom period (from–to, IST days, both included) counts exactly the jobs found on those days', async () => {
+  const get = async (path) => {
+    const res = await fetch(`${base}/${path}`);
+    return { status: res.status, headers: res.headers, body: res.headers.get('content-type')?.includes('json') ? await res.json() : await res.text() };
+  };
+  const DAY = 24 * HOUR;
+  const sumOf = (counts) => Object.values(counts).reduce((a, b) => a + b, 0);
+  const istDay = (ms) => new Date(ms + 330 * 60_000).toISOString().slice(0, 10);
+  const noonIst = (day) => new Date(`${day}T12:00:00+05:30`);
+  const { anchor } = (await get('summary?days=1')).body;
+  const daysBefore = (n) => istDay(noonIst(anchor).getTime() - n * DAY);
+
+  // Covering the same days as a preset gives the same numbers.
+  const latest = await get(`summary?from=${anchor}&to=${anchor}`);
+  assert.deepEqual(latest.body.current, (await get('summary?days=1')).body.current, 'one day = Latest day');
+  assert.equal(latest.body.days, 1);
+  assert.deepEqual([latest.body.from, latest.body.to], [anchor, anchor]);
+  const week = (await get(`summary?from=${daysBefore(6)}&to=${anchor}`)).body;
+  const preset = (await get('summary?days=7')).body;
+  assert.deepEqual([week.current, week.previous, week.comparable, week.days], [preset.current, preset.previous, preset.comparable, 7], '7 days = Last 7 days');
+
+  // Two jobs found on two days 40 and 41 days ago: a range holds both, one day holds one, Last 30 days neither.
+  const [d41, d40] = [daysBefore(41), daysBefore(40)];
+  await Job.create(
+    [d41, d40].map((day, i) => ({
+      fingerprint: `range-${i}`, title: `Range Analyst ${i}`, company: 'Range Co', course: 'data-analyst', cities: ['Pune'],
+      firstSeenAt: noonIst(day), lastSeenAt: noonIst(day), primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: [`RANGE:${i}`],
+    })),
+  );
+  const total = async (params) => (await get(`jobs?limit=1&company=Range+Co&${params}`)).body.total;
+  assert.equal(await total(`from=${d41}&to=${d40}`), 2);
+  assert.equal(await total(`from=${d40}&to=${d40}`), 1);
+  assert.equal(await total('days=30'), 0);
+
+  // Every number for the range agrees with its job list.
+  const range = `from=${d41}&to=${d40}`;
+  const summary = (await get(`summary?${range}`)).body;
+  assert.equal(sumOf(summary.current), (await get(`jobs?limit=1&${range}`)).body.total, 'tiles = job list');
+  const course = (await get(`course/data-analyst?${range}`)).body;
+  assert.equal(course.total, summary.current['data-analyst'], 'course page = its tile');
+  const platforms = (await get(`platforms?${range}`)).body;
+  assert.equal(platforms.platforms.reduce((n, p) => n + p.total, 0), sumOf(summary.current), 'platforms add up');
+  assert.equal((await get(`insights?${range}`)).body.total, sumOf(summary.current));
+  assert.equal((await get(`skill-gaps?course=data-analyst&${range}`)).body.postings, course.total);
+
+  const csv = await get(`jobs.csv?company=Range+Co&${range}`);
+  assert.match(csv.headers.get('content-disposition'), new RegExp(`jobs-${d41}-to-${d40}\.csv`));
+  assert.equal(csv.body.trim().split('\r\n').length, 3, 'header + 2 jobs');
+
+  // The custom date picker's limits: the oldest and newest day with jobs.
+  const meta = (await get('meta')).body;
+  assert.ok(meta.dataDays.first <= d41 && meta.dataDays.last >= anchor, JSON.stringify(meta.dataDays));
+
+  // Mistakes get a clear 400.
+  for (const [params, message] of [
+    ['from=2026-02-31&to=2026-03-01', /dates like/],
+    ['from=yesterday', /dates like/],
+    [`from=${d40}&to=${d41}`, /on or before/],
+    ['from=2020-01-01&to=2026-01-01', /at most 366 days/],
+  ]) {
+    const res = await get(`summary?${params}`);
+    assert.equal(res.status, 400, params);
+    assert.match(res.body.error, message, params);
+  }
+});
+
+test('performance report: each phone number and email a person added, once, with when and on which job', async () => {
+  const [job1, job2, job4] = await Promise.all(['f1', 'f2', 'f4'].map((f) => Job.findOne({ fingerprint: f }).lean()));
+  for (const job of [job1, job2, job4]) await putAs(job._id, empty); // start from nothing typed in
+  await Activity.deleteMany({});
+  const riya = 'PLACEMENT_STAFF:Riya@Example.com';
+  const aman = 'ADMIN:aman@example.com';
+
+  // Riya adds a phone and an email to job 1: two contact details.
+  assert.equal((await putAs(job1._id, { ...empty, phone: ['93456 70021'], email: ['hr@acme.in'] }, riya)).status, 200);
+  // Aman keeps the number and email that job 2's posting already had, and adds one number: one detail.
+  assert.equal((await putAs(job2._id, { ...empty, phone: ['+91 98450 12345', '93456 70022'], email: ['careers@company2.in'] }, aman)).status, 200);
+  // Riya rewrites her number the long way and removes the email: nothing added.
+  assert.equal((await putAs(job1._id, { ...empty, phone: ['+91 93456 70021'], email: [] }, riya)).status, 200);
+  // Riya writes a note on job 4 (not a contact detail), then adds a number there: one detail.
+  assert.equal((await putAs(job4._id, { ...empty, remarks: 'Called HR' }, riya)).status, 200);
+  assert.equal((await putAs(job4._id, { ...empty, remarks: 'Called HR', phone: ['93456 70023'] }, riya)).status, 200);
+
+  const get = async (q, auth) => {
+    const res = await fetch(`${base}/performance?${q}`, auth ? { headers: { Authorization: `Bearer ${auth}` } } : {});
+    return { status: res.status, body: await res.json() };
+  };
+  const { body } = await get('days=1');
+  const rows = body.rows.map((r) => [r.actor.email, r.field, r.value, r.job.title, r.job.course]).sort();
+  assert.deepEqual(rows, [
+    ['aman@example.com', 'phone', '93456 70022', job2.title, 'data-analyst'],
+    ['riya@example.com', 'email', 'hr@acme.in', job1.title, 'data-analyst'],
+    ['riya@example.com', 'phone', '93456 70021', job1.title, 'data-analyst'],
+    ['riya@example.com', 'phone', '93456 70023', job4.title, 'data-science'],
+  ]);
+  assert.ok(body.rows.every((r) => r.at && r.record && String(r.job.id) && r.actor.role), 'when, which change, which job, their role');
+  assert.ok(Date.parse(body.rows[0].at) >= Date.parse(body.rows.at(-1).at), 'newest first');
+  assert.ok(body.since, 'says when the activity record began');
+  assert.equal(body.truncated, false);
+
+  // The period: today and chosen days (IST); yesterday had none.
+  const istDay = (ms) => new Date(ms + 330 * 60_000).toISOString().slice(0, 10);
+  const today = istDay(Date.now());
+  assert.deepEqual([body.from, body.to], [today, today]);
+  assert.equal((await get(`from=${today}&to=${today}`)).body.rows.length, 4);
+  const yesterday = istDay(Date.now() - 24 * HOUR);
+  assert.equal((await get(`from=${yesterday}&to=${yesterday}`)).body.rows.length, 0);
+  assert.equal((await get('days=7')).body.rows.length, 4);
+  assert.equal((await get('from=2026-02-30')).status, 400);
+
+  // Only for signed-in people with an allowed role.
+  assert.equal((await get('days=1', 'expired')).status, 401);
+  assert.equal((await get('days=1', 'STUDENT:x@example.com')).status, 403);
 });

@@ -4,6 +4,7 @@ import path from 'node:path';
 import express from 'express';
 import { config } from './config.js';
 import apiRoutes from './api/routes.js';
+import { createClerkIdentify } from './auth.js';
 
 // Optional login: any username, the password from DASHBOARD_PASSWORD.
 function basicAuth(password) {
@@ -30,16 +31,18 @@ function allowOrigins(origins) {
     if (req.method !== 'OPTIONS') return next();
     res.set({
       'Access-Control-Allow-Methods': 'GET, PUT',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization', // Authorization: the Clerk sign-in
       'Access-Control-Max-Age': '600',
     });
     res.status(204).end();
   };
 }
 
-export function createApp() {
+// identify: who sent a request (src/auth.js); by default checked with Clerk. Tests pass their own.
+export function createApp({ identify = createClerkIdentify(config.clerk) } = {}) {
   const app = express();
   app.disable('x-powered-by');
+  app.locals.identify = identify;
 
   // Before the login check, which a browser's preflight request can't pass.
   if (config.corsOrigins.length) app.use('/api', allowOrigins(config.corsOrigins));
@@ -57,7 +60,7 @@ export function createApp() {
   if (fs.existsSync(out)) {
     // Pages are built as files: /course/data-analyst -> course/data-analyst.html. Checked before the
     // static files because the build also has a folder of the same name, which would win otherwise.
-    // HEAD as well as GET: the dashboard's links ask whether a page exists (HEAD /report/) before
+    // HEAD as well as GET: the dashboard's links ask whether a page exists (HEAD /partners/) before
     // prefetching it.
     const isRead = (req) => req.method === 'GET' || req.method === 'HEAD';
     app.use((req, res, next) => {
@@ -71,8 +74,9 @@ export function createApp() {
   }
 
   app.use((err, req, res, next) => {
-    // A bad request (e.g. unreadable JSON) is the sender's mistake, not a server error.
-    if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: 'The request could not be read.' });
+    // A bad request (e.g. unreadable JSON, a date that doesn't exist) is the sender's mistake, not a
+    // server error. publicMessage: what to tell them (set by our own checks).
+    if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: err.publicMessage ?? 'The request could not be read.' });
     console.error(err);
     res.status(500).json({ error: 'Something went wrong. Check the server logs.' });
   });

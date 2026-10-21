@@ -158,3 +158,46 @@ const collectorRunSchema = new mongoose.Schema(
 collectorRunSchema.index({ startedAt: -1 });
 
 export const CollectorRun = mongoose.model('CollectorRun', collectorRunSchema);
+
+// One document per change someone made on the dashboard: who (from their Clerk sign-in, not from the
+// browser), when, which job, and what changed in its HR details (src/activity.js). Kept for good, also
+// after the job itself is removed, so the job's title and company are copied in.
+const changeSchema = new mongoose.Schema(
+  {
+    field: { type: String, required: true }, // phone | email | assignedTo | remarks
+    change: { type: String, required: true }, // added | edited | removed
+    before: [String], // the values before (the notes as one value)
+    after: [String],
+    added: [String], // in a list: values that are new …
+    removed: [String], // … and values that are gone
+  },
+  { _id: false },
+);
+
+const activitySchema = new mongoose.Schema(
+  {
+    at: { type: Date, required: true },
+    actor: {
+      userId: { type: String, required: true }, // Clerk user id
+      email: { type: String, required: true },
+      name: String,
+      role: String, // their role at the time
+    },
+    action: { type: String, required: true }, // added | edited | removed: all the changes together
+    job: {
+      id: { type: mongoose.Schema.Types.ObjectId, required: true },
+      set: String, // filtered | nonfiltered
+      title: String,
+      company: String,
+      course: String,
+    },
+    changes: { type: [changeSchema], required: true },
+  },
+  { versionKey: false },
+);
+
+activitySchema.index({ at: -1 });
+activitySchema.index({ 'job.id': 1, at: -1 });
+activitySchema.index({ 'actor.email': 1, at: -1 });
+
+export const Activity = mongoose.model('Activity', activitySchema);

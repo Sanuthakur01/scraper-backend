@@ -91,11 +91,20 @@ export const config = {
     ),
   ],
 
+  // Clerk (sign-in): changes made on the dashboard are only accepted from a signed-in person with an
+  // allowed role, and recorded under their email (src/auth.js, src/activity.js).
+  // authorizedParties: the dashboard addresses whose sign-ins are accepted (CLERK_AUTHORIZED_PARTIES,
+  // comma-separated, e.g. https://dashboard.example.com,http://localhost:3001). Empty: any.
+  clerk: {
+    secretKey: process.env.CLERK_SECRET_KEY ?? '',
+    authorizedParties: (process.env.CLERK_AUTHORIZED_PARTIES ?? '')
+      .split(',')
+      .map((origin) => origin.trim().replace(/\/+$/, ''))
+      .filter(Boolean),
+  },
+
   scheduleLabel:
     process.env.SCHEDULE_LABEL || 'Updated daily at 07:00 IST',
-
-  // Brand used in reports and WhatsApp messages.
-  brandName: process.env.BRAND_NAME || 'IJF',
 
   demo: process.env.DEMO_MODE === '1',
 };

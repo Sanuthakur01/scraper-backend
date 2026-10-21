@@ -1,13 +1,16 @@
+import mongoose from 'mongoose';
 import express from 'express';
 import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
 import { EXCLUDED_COMPANIES } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
-import { CollectorRun, Job, NonFilteredJob } from '../models.js';
+import { Activity, CollectorRun, Job, NonFilteredJob } from '../models.js';
+import { contactChanges, overallAction } from '../activity.js';
+import { requirePermission } from '../auth.js';
 import { SKILL_NAMES, phoneKey } from '../normalize.js';
-import { groupByCompany, hiringPartners } from '../companies.js';
+import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
-import { PHONE_EXISTS, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
+import { PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
 
 const router = express.Router();
 const DAY_MS = 86_400_000;
@@ -99,7 +102,54 @@ const dayParam = (value) => {
   return Number.isNaN(start.getTime()) ? null : start;
 };
 
+// A mistake in the request: answered with 400 and this message (app.js).
+const badRequest = (message) => Object.assign(new Error(message), { status: 400, publicMessage: message });
+
+const MAX_RANGE_DAYS = 366;
+
+// The period a request asks for, as IST days:
+// - ?from=2026-10-12&to=2026-10-15: those days, both included (a custom range; from=to is one day);
+// - otherwise ?days=N: the last N days up to the latest collection day (see dayRange).
+// days = how many days it covers, so "the period before" is the same length.
+async function periodRange(query, fallbackDays, maxDays = 90) {
+  const custom = customRange(query);
+  if (custom) {
+    const run = await latestRun();
+    return { ...custom, anchor: istDate(run?.startedAt ?? new Date()), run };
+  }
+  const days = clampDays(query.days, fallbackDays, maxDays);
+  const range = await dayRange(days);
+  return { days, ...range, from: istDate(range.start), to: range.anchor, custom: false };
+}
+
+// ?from=&to= (IST days, both included; from alone is one day) as { days, start, end, from, to, custom },
+// or null when the request has neither. A date that doesn't exist, from after to, or too long: 400.
+function customRange(query) {
+  if (!query.from && !query.to) return null;
+  const start = dayParam(query.from);
+  const last = dayParam(query.to ?? query.from);
+  const real = (date, value) => date && istDate(date) === String(value); // not "2026-02-31"
+  if (!real(start, query.from) || !real(last, query.to ?? query.from)) throw badRequest('from and to must be dates like 2026-10-21.');
+  if (start > last) throw badRequest('from must be on or before to.');
+  const days = Math.round((last.getTime() - start.getTime()) / DAY_MS) + 1;
+  if (days > MAX_RANGE_DAYS) throw badRequest(`Choose at most ${MAX_RANGE_DAYS} days.`);
+  return { days, start, end: new Date(last.getTime() + DAY_MS), from: istDate(start), to: istDate(last), custom: true };
+}
+
+// A period of the activity record (people's changes, not collected jobs), so its days end today (IST),
+// not on the latest collection day: ?days=N is today and the N-1 days before; or ?from=&to=.
+function activityRange(query) {
+  const custom = customRange(query);
+  if (custom) return custom;
+  const days = clampDays(query.days, 1, MAX_RANGE_DAYS);
+  const end = new Date(istDayStart(istDate(new Date())).getTime() + DAY_MS);
+  const start = new Date(end.getTime() - days * DAY_MS);
+  return { days, start, end, from: istDate(start), to: istDate(new Date(end.getTime() - DAY_MS)), custom: false };
+}
+
 function jobFilter(query, { start, end }) {
+  // id: one job, whenever it was found (e.g. opened from the activity record).
+  if (query.id && /^[a-f\d]{24}$/i.test(String(query.id))) return { _id: String(query.id) };
   // day: one IST day (a day clicked on the trend chart) instead of the period.
   const day = dayParam(query.day);
   const filter = { firstSeenAt: day ? { $gte: day, $lt: new Date(day.getTime() + DAY_MS) } : { $gte: start, $lt: end } };
@@ -150,7 +200,7 @@ const runSummary = (run) =>
 router.get('/meta', wrap(async (req, res) => {
   const J = jobsFor(req);
   const since = new Date(Date.now() - 30 * DAY_MS);
-  const [run, cities, platforms] = await Promise.all([
+  const [run, cities, platforms, oldest, newest] = await Promise.all([
     latestRun(),
     J.aggregate([
       { $match: { firstSeenAt: { $gte: since } } },
@@ -160,7 +210,11 @@ router.get('/meta', wrap(async (req, res) => {
       { $limit: 60 },
     ]),
     platformsInUse({ firstSeenAt: { $gte: since } }, J),
+    J.findOne({}, { firstSeenAt: 1 }).sort({ firstSeenAt: 1 }).lean(),
+    J.findOne({}, { firstSeenAt: 1 }).sort({ firstSeenAt: -1 }).lean(),
   ]);
+  const lastRunDay = istDate(run?.startedAt ?? new Date());
+  const newestDay = newest ? istDate(newest.firstSeenAt) : lastRunDay;
   res.json({
     courses: COURSES.map(({ id, name }) => ({ id, name })),
     platforms,
@@ -169,6 +223,8 @@ router.get('/meta', wrap(async (req, res) => {
     // The rules jobs must pass to be kept (config/filters.js), shown on the dashboard.
     filters: { experience: config.experience, excludedCompanies: EXCLUDED_COMPANIES },
     lastRun: runSummary(run),
+    // The days jobs are stored for (oldest to newest): what a custom period can choose from.
+    dataDays: { first: oldest ? istDate(oldest.firstSeenAt) : null, last: newestDay > lastRunDay ? newestDay : lastRunDay },
     demo: config.demo,
   });
 }));
@@ -177,8 +233,7 @@ router.get('/meta', wrap(async (req, res) => {
 // the two can't be compared fairly: see collectedEveryDay).
 router.get('/summary', wrap(async (req, res) => {
   const J = jobsFor(req);
-  const days = clampDays(req.query.days, 1, 90);
-  const { anchor, start, end } = await dayRange(days);
+  const { days, anchor, start, end, from, to } = await periodRange(req.query, 1);
   const prevStart = new Date(start.getTime() - days * DAY_MS);
   const byCourse = (from, to) =>
     J.aggregate([
@@ -186,14 +241,14 @@ router.get('/summary', wrap(async (req, res) => {
       { $group: { _id: '$course', count: { $sum: 1 } } },
     ]).then(countBy);
   const [current, previous, comparable] = await Promise.all([byCourse(start, end), byCourse(prevStart, start), collectedEveryDay(prevStart, end)]);
-  res.json({ days, anchor, current, previous: comparable ? previous : {}, comparable });
+  res.json({ days, anchor, from, to, current, previous: comparable ? previous : {}, comparable });
 }));
 
 // New jobs per platform and course. Each job counts once, under its primary platform.
 router.get('/platforms', wrap(async (req, res) => {
   const J = jobsFor(req);
-  const days = clampDays(req.query.days, 1, 90);
-  const range = await dayRange(days);
+  const range = await periodRange(req.query, 1);
+  const { days } = range;
   const inRange = { firstSeenAt: { $gte: range.start, $lt: range.end } };
   const [rows, multiPlatform] = await Promise.all([
     J.aggregate([
@@ -208,14 +263,14 @@ router.get('/platforms', wrap(async (req, res) => {
     for (const r of rows) if (r._id.platform === platform) byCourse[r._id.course] = r.count;
     return { platform, byCourse, total: Object.values(byCourse).reduce((a, b) => a + b, 0) };
   });
-  res.json({ days, anchor: range.anchor, multiPlatform, platforms: result.sort((a, b) => b.total - a.total) });
+  res.json({ days, anchor: range.anchor, from: range.from, to: range.to, multiPlatform, platforms: result.sort((a, b) => b.total - a.total) });
 }));
 
 // New jobs per IST day and course, with every day present (zeros included).
 router.get('/trends', wrap(async (req, res) => {
   const J = jobsFor(req);
-  const days = clampDays(req.query.days, 30, 90);
-  const range = await dayRange(days);
+  const range = await periodRange(req.query, 30);
+  const { days } = range;
   const rows = await J.aggregate([
     { $match: { firstSeenAt: { $gte: range.start, $lt: range.end } } },
     {
@@ -243,14 +298,14 @@ router.get('/trends', wrap(async (req, res) => {
   // Days before the daily collection started came from a one-off backfill (may be incomplete).
   const since = await dailySince();
   const backfilledBefore = since && first && first.firstSeenAt < since ? istDate(since) : null;
-  res.json({ days, anchor: range.anchor, series, backfilledBefore });
+  res.json({ days, anchor: range.anchor, from: range.from, to: range.to, series, backfilledBefore });
 }));
 
 // Top companies, cities, experience levels and skills in the window.
 router.get('/insights', wrap(async (req, res) => {
   const J = jobsFor(req);
-  const days = clampDays(req.query.days, 7, 90);
-  const range = await dayRange(days);
+  const range = await periodRange(req.query, 7);
+  const { days } = range;
   const match = jobFilter(req.query, range);
   const [facets] = await J.aggregate([
     { $match: match },
@@ -288,6 +343,8 @@ router.get('/insights', wrap(async (req, res) => {
   res.json({
     days,
     anchor: range.anchor,
+    from: range.from,
+    to: range.to,
     total: facets.total[0]?.n ?? 0,
     companies: toList(facets.companies),
     cities: toList(facets.cities),
@@ -302,8 +359,8 @@ router.get('/course/:id', wrap(async (req, res) => {
   const J = jobsFor(req);
   const course = COURSES.find((c) => c.id === req.params.id);
   if (!course) return res.status(404).json({ error: 'Unknown course' });
-  const days = clampDays(req.query.days, 1, 90);
-  const range = await dayRange(days);
+  const range = await periodRange(req.query, 1);
+  const { days } = range;
   const match = { course: course.id, firstSeenAt: { $gte: range.start, $lt: range.end } };
   const prevStart = new Date(range.start.getTime() - days * DAY_MS);
   const top = (field, limit = 10) => [
@@ -349,6 +406,8 @@ router.get('/course/:id', wrap(async (req, res) => {
     course: { id: course.id, name: course.name },
     days,
     anchor: range.anchor,
+    from: range.from,
+    to: range.to,
     total: n(facets.total),
     previous,
     platforms: platforms
@@ -381,8 +440,8 @@ router.get('/skill-gaps', wrap(async (req, res) => {
   const J = jobsFor(req);
   const course = COURSES.find((c) => c.id === req.query.course);
   if (!course) return res.status(404).json({ error: 'Unknown course.' });
-  const days = clampDays(req.query.days, 1, 90);
-  const range = await dayRange(days);
+  const range = await periodRange(req.query, 1);
+  const { days } = range;
   const match = { course: course.id, firstSeenAt: { $gte: range.start, $lt: range.end } };
   const [postings, platforms] = await Promise.all([
     J.find(match, { skills: 1, firstSeenAt: 1, title: 1, company: 1, cities: 1, primaryPlatform: 1, links: 1 }).lean(),
@@ -394,6 +453,8 @@ router.get('/skill-gaps', wrap(async (req, res) => {
     course: { id: course.id, name: course.name },
     days,
     anchor: range.anchor,
+    from: range.from,
+    to: range.to,
     teaches: course.teaches,
     ...skillGaps(postings, course.teaches),
     // Adding skills one after another, and the jobs within reach (for trying other combinations and
@@ -418,74 +479,6 @@ router.get('/skill-gaps', wrap(async (req, res) => {
       firstSeenTo: seen.length ? new Date(seen.reduce((a, b) => Math.max(a, b))) : null,
       lastRefreshed: range.run?.finishedAt ?? null,
     },
-  });
-}));
-
-// ---------- Weekly report ----------
-
-// The job market report to share (dashboard Report page): the last 7 days up to the latest collection
-// day, and the 7 days before for comparison. `comparable` is false until collection had already
-// started when that earlier week began, so a half-empty week is never compared.
-const REPORT_DAYS = 7;
-const VAGUE_CITIES = ['India (city not stated)', 'Remote'];
-
-router.get('/report', wrap(async (req, res) => {
-  const J = jobsFor(req);
-  const range = await dayRange(REPORT_DAYS);
-  const prevStart = new Date(range.start.getTime() - REPORT_DAYS * DAY_MS);
-  const inRange = { firstSeenAt: { $gte: range.start, $lt: range.end } };
-  const [[facets], previousRows, comparable, platforms, companies] = await Promise.all([
-    J.aggregate([
-      { $match: inRange },
-      {
-        $facet: {
-          courses: [{ $group: { _id: '$course', count: { $sum: 1 } } }],
-          skills: [
-            { $unwind: '$skills' },
-            { $group: { _id: { course: '$course', skill: '$skills' }, count: { $sum: 1 } } },
-            { $sort: { count: -1, '_id.skill': 1 } },
-          ],
-          cities: [
-            { $unwind: '$cities' },
-            { $match: { cities: { $nin: VAGUE_CITIES } } },
-            { $group: { _id: '$cities', count: { $sum: 1 } } },
-            { $sort: { count: -1, _id: 1 } },
-            { $limit: 5 },
-          ],
-        },
-      },
-    ]),
-    J.aggregate([
-      { $match: { firstSeenAt: { $gte: prevStart, $lt: range.start } } },
-      { $group: { _id: '$course', count: { $sum: 1 } } },
-    ]).then(countBy),
-    collectedEveryDay(prevStart, range.end),
-    J.distinct('platforms', inRange),
-    J.find(inRange, { _id: 0, company: 1 }).lean(),
-  ]);
-  const current = countBy(facets.courses);
-  const toList = (rows) => rows.map((r) => ({ name: r._id, count: r.count }));
-  res.json({
-    from: istDate(range.start),
-    to: istDate(new Date(range.end.getTime() - DAY_MS)),
-    total: Object.values(current).reduce((a, b) => a + b, 0),
-    comparable,
-    courses: COURSES.map((c) => ({
-      id: c.id,
-      name: c.name,
-      count: current[c.id] ?? 0,
-      previous: comparable ? (previousRows[c.id] ?? 0) : null,
-      skills: facets.skills.filter((s) => s._id.course === c.id).slice(0, 3).map((s) => s._id.skill),
-    })),
-    companies: groupByCompany(companies)
-      .map((g) => ({ name: g.name, count: g.jobs.length }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-      .slice(0, 5),
-    cities: toList(facets.cities),
-    platforms: platforms.sort(),
-    experience: config.experience,
-    brand: config.brandName,
-    lastRefreshed: range.run?.finishedAt ?? null,
   });
 }));
 
@@ -549,8 +542,8 @@ const JOB_SORT = { firstSeenAt: -1, postedAt: -1, _id: 1 };
 
 router.get('/jobs', wrap(async (req, res) => {
   const J = jobsFor(req);
-  const days = clampDays(req.query.days, 1, 90);
-  const range = await dayRange(days);
+  const range = await periodRange(req.query, 1);
+  const { days } = range;
   const filter = jobFilter(req.query, range);
   const pageSize = Math.min(clampDays(req.query.limit, 25, 100), 100);
   const page = clampDays(req.query.page, 1, 100_000);
@@ -566,6 +559,8 @@ router.get('/jobs', wrap(async (req, res) => {
   res.json({
     days,
     anchor: range.anchor,
+    from: range.from,
+    to: range.to,
     page,
     pageSize,
     total,
@@ -579,18 +574,21 @@ router.get('/jobs', wrap(async (req, res) => {
 // field clears it; when all three are empty the job has no typed-in details (and shows what its
 // postings say, if anything). The collector never writes these, so the next run can't undo them.
 // A phone number another job already has is refused (409) with PHONE_EXISTS, and `detail` says which job.
-router.put('/jobs/:id/follow-up', express.json({ limit: '10kb' }), wrap(async (req, res) => {
+// Only a signed-in person whose role may edit HR details (src/auth.js); every change is recorded under
+// their email (Activity).
+router.put('/jobs/:id/follow-up', requirePermission('edit-hr-details'), express.json({ limit: '10kb' }), wrap(async (req, res) => {
   const notFound = () => res.status(404).json({ error: 'Job not found. It may have been removed.' });
   if (!/^[a-f\d]{24}$/i.test(req.params.id)) return notFound();
   const input = parseFollowUpInput(req.body);
   if (input.error) return res.status(400).json({ error: input.error });
 
   // A kept job, or a non-filtered one (ids are unique across both).
+  const fields = { foundPhones: 1, foundEmails: 1, manual: 1, title: 1, company: 1, course: 1 };
   let model = Job;
-  let current = await Job.findById(req.params.id, { foundPhones: 1, manual: 1 }).lean();
+  let current = await Job.findById(req.params.id, fields).lean();
   if (!current) {
     model = NonFilteredJob;
-    current = await NonFilteredJob.findById(req.params.id, { foundPhones: 1, manual: 1 }).lean();
+    current = await NonFilteredJob.findById(req.params.id, fields).lean();
   }
   if (!current) return notFound();
   const owner = await findPhoneOwner(input.value.phoneKeys, current);
@@ -600,11 +598,131 @@ router.put('/jobs/:id/follow-up', express.json({ limit: '10kb' }), wrap(async (r
     return res.status(409).json({ error: PHONE_EXISTS, detail: `${number} is already saved on ${where}.` });
   }
 
-  const record = manualRecord(input.value, new Date());
+  const now = new Date();
+  const record = manualRecord(input.value, now);
   const update = record ? { $set: { manual: record } } : { $unset: { manual: 1 } };
-  const job = await model.findByIdAndUpdate(req.params.id, update, { returnDocument: 'after', projection: JOB_FIELDS }).lean();
-  if (!job) return notFound();
+
+  // What the dashboard shows before and after this save; nothing changed (e.g. saved as it was): no record.
+  const changes = contactChanges(contactView(current), contactView({ ...current, manual: record ?? undefined }));
+  // The record is written first, so a change is never saved without one. If the save then fails, the
+  // record goes again.
+  const entry = changes.length
+    ? await Activity.create({
+        at: now,
+        actor: req.person,
+        action: overallAction(changes),
+        job: { id: current._id, set: model === Job ? 'filtered' : 'nonfiltered', title: current.title, company: current.company, course: current.course },
+        changes,
+      })
+    : null;
+  const undoRecord = () => (entry ? Activity.deleteOne({ _id: entry._id }).catch((err) => console.error(`Could not remove activity ${entry._id}: ${err.message}`)) : null);
+  let job;
+  try {
+    job = await model.findByIdAndUpdate(req.params.id, update, { returnDocument: 'after', projection: JOB_FIELDS }).lean();
+  } catch (err) {
+    await undoRecord();
+    throw err;
+  }
+  if (!job) {
+    await undoRecord();
+    return notFound();
+  }
   res.json(jobRow(job));
+}));
+
+// The activity record: who changed which job's HR details, when, and what changed. Newest first.
+// Filters: ?job=<id> · ?email= one person · ?action=added|edited|removed · ?q= words in the job title or
+// company. ?limit= (at most 200). ?before= the `next` of the page before (its last record's time and id).
+// The first page also says how many records match (total) and who has made changes (people).
+// Only for signed-in people with an allowed role.
+const ACTIONS = ['added', 'edited', 'removed'];
+router.get('/activity', requirePermission('view'), wrap(async (req, res) => {
+  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
+  const filter = {};
+  if (req.query.job) {
+    if (!/^[a-f\d]{24}$/i.test(String(req.query.job))) return res.status(400).json({ error: 'job must be a job id.' });
+    filter['job.id'] = String(req.query.job);
+  }
+  if (req.query.email) filter['actor.email'] = new RegExp(`^${escapeRegex(String(req.query.email).trim())}$`, 'i');
+  if (ACTIONS.includes(req.query.action)) filter.action = req.query.action;
+  const search = String(req.query.q ?? '').trim();
+  if (search) {
+    const rx = new RegExp(escapeRegex(search), 'i');
+    filter.$or = [{ 'job.title': rx }, { 'job.company': rx }];
+  }
+
+  // The page after a record: older ones, or as old with a smaller id (two changes in the same millisecond).
+  let page = filter;
+  if (req.query.before) {
+    const [time, id] = String(req.query.before).split('_');
+    const at = new Date(time);
+    if (Number.isNaN(at.getTime()) || (id && !/^[a-f\d]{24}$/i.test(id))) return res.status(400).json({ error: 'before must be the next value of a page.' });
+    const older = id ? { $or: [{ at: { $lt: at } }, { at, _id: { $lt: new mongoose.Types.ObjectId(id) } }] } : { at: { $lt: at } };
+    page = { $and: [filter, older] };
+  }
+
+  const first = !req.query.before;
+  const [items, total, people] = await Promise.all([
+    Activity.find(page).sort({ at: -1, _id: -1 }).limit(limit + 1).lean(),
+    first ? Activity.countDocuments(filter) : null,
+    first
+      ? Activity.aggregate([
+          { $sort: { at: -1 } },
+          { $group: { _id: '$actor.email', name: { $first: '$actor.name' }, count: { $sum: 1 } } },
+          { $sort: { count: -1, _id: 1 } },
+        ])
+      : null,
+  ]);
+  const shown = items.slice(0, limit);
+  const last = shown.at(-1);
+  res.json({
+    items: shown,
+    next: items.length > limit ? `${last.at.toISOString()}_${last._id}` : null,
+    ...(first ? { total, people: people.map((p) => ({ email: p._id, name: p.name ?? '', count: p.count })) } : {}),
+  });
+}));
+
+// ---------- Performance report ----------
+
+// Who added how many HR contact details (phone numbers and emails) in a period, from the activity
+// record: one row per number or email a person added, with when and on which job. A number only
+// written differently, or one the job's posting already had, isn't one (see activity.js). The
+// dashboard groups the rows person → course → company → job. Signed-in people with an allowed role.
+const CONTACT_FIELDS = ['phone', 'email'];
+const MAX_PERFORMANCE_ROWS = 20_000;
+
+router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
+  const range = activityRange(req.query);
+  const [rows, first] = await Promise.all([
+    Activity.aggregate([
+      { $match: { at: { $gte: range.start, $lt: range.end } } },
+      { $sort: { at: -1, _id: -1 } },
+      { $unwind: '$changes' },
+      { $match: { 'changes.field': { $in: CONTACT_FIELDS } } },
+      { $unwind: '$changes.added' },
+      { $limit: MAX_PERFORMANCE_ROWS + 1 },
+      {
+        $project: {
+          _id: 0,
+          record: '$_id',
+          at: 1,
+          actor: { email: { $toLower: '$actor.email' }, name: '$actor.name', role: '$actor.role' },
+          job: 1,
+          field: '$changes.field',
+          value: '$changes.added',
+        },
+      },
+    ]),
+    Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean(),
+  ]);
+  res.json({
+    days: range.days,
+    from: range.from,
+    to: range.to,
+    since: first?.at ?? null, // when the activity record began: nothing before it can be counted
+    rows: rows.slice(0, MAX_PERFORMANCE_ROWS),
+    truncated: rows.length > MAX_PERFORMANCE_ROWS,
+  });
 }));
 
 // A non-filtered job's leftOutBy, in words.
@@ -620,8 +738,8 @@ const experienceLabel = (job) =>
 
 router.get('/jobs.csv', wrap(async (req, res) => {
   const J = jobsFor(req);
-  const days = clampDays(req.query.days, 1, 90);
-  const range = await dayRange(days);
+  const range = await periodRange(req.query, 1);
+  const { days } = range;
   const jobs = await J.find(jobFilter(req.query, range), JOB_FIELDS).sort(JOB_SORT).limit(10_000).lean();
   const courseName = Object.fromEntries(COURSES.map((c) => [c.id, c.name]));
   const platforms = await platformsInUse({ firstSeenAt: { $gte: range.start, $lt: range.end } }, J);
@@ -652,7 +770,7 @@ router.get('/jobs.csv', wrap(async (req, res) => {
       .join(','),
   );
   res.set('Content-Type', 'text/csv; charset=utf-8');
-  res.set('Content-Disposition', `attachment; filename="${nonFiltered ? 'non-filtered-' : ''}jobs-${range.anchor}-${days}d.csv"`);
+  res.set('Content-Disposition', `attachment; filename="${nonFiltered ? 'non-filtered-' : ''}jobs-${range.custom ? (range.from === range.to ? range.from : `${range.from}-to-${range.to}`) : `${range.anchor}-${days}d`}.csv"`);
   res.send(`﻿${[header.join(','), ...lines].join('\r\n')}`);
 }));
 
