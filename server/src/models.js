@@ -189,6 +189,7 @@ const activitySchema = new mongoose.Schema(
       role: String, // their role at the time
     },
     action: { type: String, required: true }, // added | edited | removed: all the changes together
+    via: String, // 'ai': made with IJF AI (confirmed by the person in the chat)
     job: {
       id: { type: mongoose.Schema.Types.ObjectId, required: true },
       set: String, // filtered | nonfiltered
@@ -227,3 +228,75 @@ const contactOutcomeSchema = new mongoose.Schema(
 contactOutcomeSchema.index({ job: 1, field: 1, key: 1 }, { unique: true });
 
 export const ContactOutcome = mongoose.model('ContactOutcome', contactOutcomeSchema);
+
+// ---------- IJF AI (src/ai/) ----------
+
+// A change IJF AI suggested in a chat, done only when the person clicks Confirm.
+const chatActionSchema = new mongoose.Schema({
+  type: { type: String, required: true }, // add-hr-details | set-follow-up
+  summary: String, // what it will do, in words (contacts written as the person typed them)
+  summaryForModel: String, // the same with stand-ins, for the AI's next turns
+  payload: mongoose.Schema.Types.Mixed, // what is sent when confirmed (real values, never shown to the AI)
+  status: { type: String, default: 'pending' }, // pending | done | failed | cancelled
+  error: String,
+  doneAt: Date,
+});
+
+const chatMessageSchema = new mongoose.Schema({
+  role: { type: String, required: true }, // user | assistant
+  content: { type: String, default: '' }, // as shown to the person
+  modelContent: String, // a question as sent to the AI: phone numbers and emails replaced by [phone 1], [email 1]
+  at: { type: Date, default: Date.now },
+  cards: { type: [mongoose.Schema.Types.Mixed], default: undefined }, // what the screen shows beside the answer (contacts, jobs…)
+  actions: { type: [chatActionSchema], default: undefined },
+  tools: { type: [{ name: String, args: mongoose.Schema.Types.Mixed, _id: false }], default: undefined }, // what it looked up
+  context: mongoose.Schema.Types.Mixed, // the page the question was asked on
+  feedback: String, // up | down
+  tokens: { prompt: Number, completion: Number },
+  error: String,
+});
+
+// One conversation with IJF AI, kept for its person (only they can open it).
+const chatSchema = new mongoose.Schema(
+  {
+    userId: { type: String, required: true },
+    email: { type: String, required: true },
+    name: String,
+    title: String, // the first question, shortened
+    messages: { type: [chatMessageSchema], default: [] },
+    // [phone 1] / [email 1] -> the number or address the person typed (only on this server).
+    secrets: { type: mongoose.Schema.Types.Mixed, default: {} },
+  },
+  { timestamps: true, versionKey: false },
+);
+chatSchema.index({ userId: 1, updatedAt: -1 });
+
+export const Chat = mongoose.model('Chat', chatSchema);
+
+// Questions and tokens per person per IST day: the daily limit, and the usage for admins.
+const aiUsageSchema = new mongoose.Schema(
+  {
+    email: { type: String, required: true },
+    day: { type: String, required: true }, // 2026-10-22 (IST)
+    questions: { type: Number, default: 0 },
+    promptTokens: { type: Number, default: 0 },
+    completionTokens: { type: Number, default: 0 },
+  },
+  { versionKey: false },
+);
+aiUsageSchema.index({ email: 1, day: 1 }, { unique: true });
+
+export const AiUsage = mongoose.model('AiUsage', aiUsageSchema);
+
+// The day's briefing ("what changed since yesterday"), written once per IST day for everyone.
+const aiBriefingSchema = new mongoose.Schema(
+  {
+    day: { type: String, required: true, unique: true },
+    text: String,
+    createdAt: Date,
+    tokens: { prompt: Number, completion: Number },
+  },
+  { versionKey: false },
+);
+
+export const AiBriefing = mongoose.model('AiBriefing', aiBriefingSchema);

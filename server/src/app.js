@@ -5,6 +5,8 @@ import express from 'express';
 import { config } from './config.js';
 import apiRoutes from './api/routes.js';
 import { createClerkIdentify } from './auth.js';
+import { createOpenAi } from './ai/openai.js';
+import aiRoutes from './ai/routes.js';
 
 // Optional login: any username, the password from DASHBOARD_PASSWORD.
 function basicAuth(password) {
@@ -21,7 +23,8 @@ function basicAuth(password) {
 }
 
 // A dashboard hosted on another address (its NEXT_PUBLIC_API_URL points here) may only read this API if
-// the API names that address: CORS_ORIGINS. Answers the browser's preflight check for saving (PUT) too.
+// the API names that address: CORS_ORIGINS. Answers the browser's preflight check for saving (PUT), IJF AI
+// (POST, streamed answers) and deleting a chat (DELETE) too.
 function allowOrigins(origins) {
   return (req, res, next) => {
     res.vary('Origin');
@@ -30,7 +33,7 @@ function allowOrigins(origins) {
     res.set('Access-Control-Allow-Origin', origin);
     if (req.method !== 'OPTIONS') return next();
     res.set({
-      'Access-Control-Allow-Methods': 'GET, PUT',
+      'Access-Control-Allow-Methods': 'GET, PUT, POST, DELETE',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization', // Authorization: the Clerk sign-in
       'Access-Control-Max-Age': '600',
     });
@@ -39,10 +42,11 @@ function allowOrigins(origins) {
 }
 
 // identify: who sent a request (src/auth.js); by default checked with Clerk. Tests pass their own.
-export function createApp({ identify = createClerkIdentify(config.clerk) } = {}) {
+export function createApp({ identify = createClerkIdentify(config.clerk), ai = config.ai.apiKey ? createOpenAi(config.ai) : null } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.locals.identify = identify;
+  app.locals.ai = ai; // IJF AI's model call (src/ai/openai.js), null when OPEN_AI_API_KEY isn't set
 
   // Before the login check, which a browser's preflight request can't pass.
   if (config.corsOrigins.length) app.use('/api', allowOrigins(config.corsOrigins));
@@ -52,6 +56,7 @@ export function createApp({ identify = createClerkIdentify(config.clerk) } = {})
 
   if (config.dashboardPassword) app.use(basicAuth(config.dashboardPassword));
 
+  app.use('/api', aiRoutes);
   app.use('/api', apiRoutes);
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

@@ -14,6 +14,17 @@ import { skillGaps, skillPlan } from '../skillGaps.js';
 import { MAX_STUDENTS, PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
 
 const router = express.Router();
+
+// Every route's handler, by "GET /summary", so IJF AI's tools can run the same code in-process (src/ai/
+// tools.js: callRoute) and always give the same numbers as the dashboard.
+export const routeHandlers = new Map();
+for (const method of ['get', 'put', 'post', 'delete']) {
+  const register = router[method].bind(router);
+  router[method] = (path, ...handlers) => {
+    routeHandlers.set(`${method.toUpperCase()} ${path}`, handlers.at(-1));
+    return register(path, ...handlers);
+  };
+}
 const DAY_MS = 86_400_000;
 const IST_OFFSET_MS = 330 * 60_000;
 const IST = 'Asia/Kolkata';
@@ -77,6 +88,13 @@ async function dayRange(days) {
 // Used both to count what the dashboard shows (cards, charts) and to list the jobs behind a number
 // (the job list's filters below), so a number and its list always agree.
 const ON_SEVERAL_SITES = { 'platforms.1': { $exists: true } };
+// HR details: an HR name, profile link, phone, email or note typed in, or a phone or email found in the
+// posting. Students assigned alone don't count.
+const typedIn = (field) => ({ [`manual.${field}`]: { $nin: [null, ''] } });
+const listedIn = (field) => ({ [`manual.${field}.0`]: { $exists: true } });
+const HAS_HR_DETAILS = {
+  $or: [listedIn('hrNames'), listedIn('hrProfiles'), typedIn('phone'), typedIn('email'), typedIn('remarks'), { 'foundPhones.0': { $exists: true } }, { 'foundEmails.0': { $exists: true } }],
+};
 const SALARY_SHOWN = { salaryText: { $nin: [null, ''], $not: /not disclosed/i } };
 
 // How old a posting was when our collector first found it: 'day' (up to 24 hours), '3days', 'week',
@@ -164,6 +182,9 @@ function jobFilter(query, { start, end }) {
   if (POSTING_AGES.includes(query.age)) filter.$expr = { $eq: [POSTING_AGE, query.age] };
   if (query.sites === '2') Object.assign(filter, ON_SEVERAL_SITES);
   if (query.salary === 'shown') Object.assign(filter, SALARY_SHOWN);
+  // hr: 'none' = no HR details yet, 'some' = has them (the same test as the job list's withContact).
+  if (query.hr === 'none') filter.$nor = [HAS_HR_DETAILS];
+  if (query.hr === 'some') filter.$and = [...(filter.$and ?? []), HAS_HR_DETAILS];
   const search = String(query.q ?? '').trim();
   if (search) {
     const rx = new RegExp(escapeRegex(search), 'i');
@@ -225,6 +246,7 @@ router.get('/meta', wrap(async (req, res) => {
     // The rules jobs must pass to be kept (config/filters.js), shown on the dashboard.
     filters: { experience: config.experience, excludedCompanies: EXCLUDED_COMPANIES },
     lastRun: runSummary(run),
+    aiEnabled: Boolean(req.app?.locals.ai), // IJF AI is set up (OPEN_AI_API_KEY)
     // The days jobs are stored for (oldest to newest): what a custom period can choose from.
     dataDays: { first: oldest ? istDate(oldest.firstSeenAt) : null, last: newestDay > lastRunDay ? newestDay : lastRunDay },
     demo: config.demo,
@@ -549,13 +571,8 @@ router.get('/jobs', wrap(async (req, res) => {
   const filter = jobFilter(req.query, range);
   const pageSize = Math.min(clampDays(req.query.limit, 25, 100), 100);
   const page = clampDays(req.query.page, 1, 100_000);
-  // withContact: how many of these jobs have HR details: an HR name, profile link, phone, email or note
-  // (typed in), or a phone or email found in the posting. Students assigned alone don't count.
-  const typed = (field) => ({ [`manual.${field}`]: { $nin: [null, ''] } });
-  const listed = (field) => ({ [`manual.${field}.0`]: { $exists: true } });
-  const hasContact = {
-    $or: [listed('hrNames'), listed('hrProfiles'), typed('phone'), typed('email'), typed('remarks'), { 'foundPhones.0': { $exists: true } }, { 'foundEmails.0': { $exists: true } }],
-  };
+  // withContact: how many of these jobs have HR details (HAS_HR_DETAILS).
+  const hasContact = HAS_HR_DETAILS;
   const [items, total, withContact] = await Promise.all([
     J.find(filter, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
     J.countDocuments(filter),
@@ -615,6 +632,7 @@ router.put('/jobs/:id/follow-up', requirePermission('edit-hr-details'), express.
     ? await Activity.create({
         at: now,
         actor: req.person,
+        ...(req.via ? { via: req.via } : {}),
         action: overallAction(changes),
         job: { id: current._id, set: model === Job ? 'filtered' : 'nonfiltered', title: current.title, company: current.company, course: current.course },
         changes,
@@ -804,6 +822,7 @@ router.put('/outcomes', requirePermission('record-outcomes'), express.json({ lim
   const entry = await Activity.create({
     at: now,
     actor: req.person,
+    ...(req.via ? { via: req.via } : {}),
     action: overallAction(changes),
     job: { id: job._id, set: model === Job ? 'filtered' : 'nonfiltered', title: job.title, company: job.company, course: job.course },
     changes,

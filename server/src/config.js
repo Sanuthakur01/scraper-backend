@@ -106,5 +106,15 @@ export const config = {
   scheduleLabel:
     process.env.SCHEDULE_LABEL || 'Updated daily at 07:00 IST',
 
+  // IJF AI (the chat, src/ai/): OpenAI, called only from this server, never from the browser. No key:
+  // the chat is switched off and the dashboard doesn't show it. dailyLimit: questions per person per
+  // IST day (people aren't told the number). model: any OpenAI chat model with tool calling.
+  ai: {
+    apiKey: process.env.OPEN_AI_API_KEY || process.env.OPENAI_API_KEY || '',
+    model: process.env.OPENAI_MODEL || 'gpt-5.4-mini',
+    reasoningEffort: process.env.OPENAI_REASONING_EFFORT ?? 'low', // '' to leave it to the model
+    dailyLimit: int(process.env.AI_DAILY_LIMIT, 50),
+  },
+
   demo: process.env.DEMO_MODE === '1',
 };

@@ -9,9 +9,10 @@ export const ROLES = ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM'
 // view             - read the dashboard's data (here: the activity record)
 // edit-hr-details  - add or change a job's HR phone numbers, emails, students and notes
 // record-outcomes  - in the performance report: give an HR number or email to a student, and record how it went
+// view-ai-usage    - see how much each person uses IJF AI (questions, tokens)
 export const PERMISSIONS = {
-  SUPER_ADMIN: ['view', 'edit-hr-details', 'record-outcomes'],
-  ADMIN: ['view', 'edit-hr-details', 'record-outcomes'],
+  SUPER_ADMIN: ['view', 'edit-hr-details', 'record-outcomes', 'view-ai-usage'],
+  ADMIN: ['view', 'edit-hr-details', 'record-outcomes', 'view-ai-usage'],
   PLACEMENT_STAFF: ['view', 'edit-hr-details', 'record-outcomes'],
   RESEARCH_TEAM: ['view', 'edit-hr-details', 'record-outcomes'],
 };

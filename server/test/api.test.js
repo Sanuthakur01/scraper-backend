@@ -404,6 +404,7 @@ test('a dashboard hosted elsewhere can use the API only if its address is in COR
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers.get('access-control-allow-origin'), dashboard);
     assert.match(preflight.headers.get('access-control-allow-methods'), /PUT/);
+    assert.match(preflight.headers.get('access-control-allow-methods'), /DELETE/, 'deleting an IJF AI chat');
     assert.match(preflight.headers.get('access-control-allow-headers'), /Content-Type/i);
 
     const read = await fetch(`${api}/meta`, { headers: { Origin: dashboard } });
