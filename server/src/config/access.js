@@ -8,11 +8,12 @@ export const ROLES = ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM'
 
 // view             - read the dashboard's data (here: the activity record)
 // edit-hr-details  - add or change a job's HR phone numbers, emails, students and notes
+// record-outcomes  - in the performance report: give an HR number or email to a student, and record how it went
 export const PERMISSIONS = {
-  SUPER_ADMIN: ['view', 'edit-hr-details'],
-  ADMIN: ['view', 'edit-hr-details'],
-  PLACEMENT_STAFF: ['view', 'edit-hr-details'],
-  RESEARCH_TEAM: ['view', 'edit-hr-details'],
+  SUPER_ADMIN: ['view', 'edit-hr-details', 'record-outcomes'],
+  ADMIN: ['view', 'edit-hr-details', 'record-outcomes'],
+  PLACEMENT_STAFF: ['view', 'edit-hr-details', 'record-outcomes'],
+  RESEARCH_TEAM: ['view', 'edit-hr-details', 'record-outcomes'],
 };
 
 // The role written in public metadata, as typed there.

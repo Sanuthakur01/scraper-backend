@@ -34,6 +34,8 @@ const jobSchema = new mongoose.Schema(
     manual: {
       type: new mongoose.Schema(
         {
+          hrNames: { type: [String], default: undefined }, // the HR people's names
+          hrProfiles: { type: [String], default: undefined }, // links to their profiles (e.g. LinkedIn)
           phone: String,
           phoneKeys: { type: [String], default: undefined },
           email: String,
@@ -164,12 +166,15 @@ export const CollectorRun = mongoose.model('CollectorRun', collectorRunSchema);
 // after the job itself is removed, so the job's title and company are copied in.
 const changeSchema = new mongoose.Schema(
   {
-    field: { type: String, required: true }, // phone | email | assignedTo | remarks
+    // hrName | hrProfile | phone | email | assignedTo | remarks, or about one number/email in the
+    // performance report: contactStudent (who it was given to) | contactRemark (how it went)
+    field: { type: String, required: true },
     change: { type: String, required: true }, // added | edited | removed
     before: [String], // the values before (the notes as one value)
     after: [String],
     added: [String], // in a list: values that are new …
     removed: [String], // … and values that are gone
+    contact: { type: new mongoose.Schema({ field: String, value: String }, { _id: false }), default: undefined }, // contactStudent / contactRemark: which number or email
   },
   { _id: false },
 );
@@ -201,3 +206,24 @@ activitySchema.index({ 'job.id': 1, at: -1 });
 activitySchema.index({ 'actor.email': 1, at: -1 });
 
 export const Activity = mongoose.model('Activity', activitySchema);
+
+// The performance report's follow-up of one HR phone number or email of a job (src/outcomes.js): the
+// student it was given to and how it went. One per job and number/email (key: bare digits, or the
+// address in lower case); kept apart from the job's typed-in details, so editing those never touches it.
+const contactOutcomeSchema = new mongoose.Schema(
+  {
+    job: { type: mongoose.Schema.Types.ObjectId, required: true },
+    field: { type: String, required: true }, // phone | email
+    key: { type: String, required: true },
+    value: String, // as written
+    student: String,
+    status: String, // dnp | wrong | not-person | cv-shared | no-openings | other (outcomes.js REMARKS)
+    note: String, // the words of an "Others" remark
+    updatedAt: Date,
+    updatedBy: { email: String, name: String },
+  },
+  { versionKey: false },
+);
+contactOutcomeSchema.index({ job: 1, field: 1, key: 1 }, { unique: true });
+
+export const ContactOutcome = mongoose.model('ContactOutcome', contactOutcomeSchema);

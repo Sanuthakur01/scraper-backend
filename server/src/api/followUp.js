@@ -1,5 +1,5 @@
-// What the team records by hand for a job: HR phone, email, remarks and the students it is assigned
-// to, in the `manual` field, which only the dashboard writes, so a collection never overwrites it. The
+// What the team records by hand for a job: the HR person's name and profile link (e.g. LinkedIn), HR
+// phone, email, remarks and the students it is assigned to, in the `manual` field, which only the dashboard writes, so a collection never overwrites it. The
 // collector also finds contacts written in the postings (foundPhones, foundEmails); what was typed in
 // is shown instead.
 // A phone number can be typed in only if no other job has it yet (findPhoneOwner).
@@ -9,14 +9,32 @@ import { formatIndianPhone, phoneKey } from '../normalize.js';
 
 export const PHONE_EXISTS = 'This number already exists.';
 
-// Phone numbers, and email addresses, a job can have typed in (the dashboard has a box for each).
-export const MAX_ENTRIES = 5;
+// Phone numbers, email addresses, HR names and HR profile links a job can have typed in (each; the
+// dashboard has a box for each value).
+export const MAX_ENTRIES = 10;
 // Students a job can be assigned to (one box each), and the longest name.
 export const MAX_STUDENTS = 20;
 const NAME_LIMIT = 60;
 const REMARKS_LIMIT = 1000;
 const EMAIL_LIMIT = 120; // one address
 const EMAIL = /^[^\s@,;]+@[^\s@,;]+\.[a-z]{2,}$/i;
+const HR_NAME_LIMIT = 80;
+const PROFILE_LIMIT = 300; // one link
+
+// "linkedin.com/in/riya" -> "https://linkedin.com/in/riya". A web address (http or https, with a
+// domain), or null: never another kind of link (javascript:, mailto:…), which the dashboard would open.
+export function profileUrl(text) {
+  const value = /^[a-z][a-z\d+.-]*:/i.test(text) ? text : `https://${text}`;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname.includes('.') || url.username || url.password) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+// Two links to the same page: compared without "https://", "www." or a trailing slash, ignoring case.
+const profileKey = (url) => url.toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/\/+$/, '');
 
 // A phone or email field as sent: one string (several values separated by commas, e.g. from an older
 // dashboard or the API) or a list with one string per box. Returns the values, trimmed, empty ones dropped.
@@ -33,6 +51,8 @@ export function contactView({ foundPhones, foundEmails, manual }) {
   const [phone, phoneSource] = pick(manual?.phone, foundPhones);
   const [email, emailSource] = pick(manual?.email, foundEmails);
   return {
+    hrNames: manual?.hrNames ?? [],
+    hrProfiles: manual?.hrProfiles ?? [],
     phone,
     phoneSource,
     email,
@@ -49,7 +69,8 @@ export const jobRow = ({ foundPhones, foundEmails, manual, ...job }) => ({
   contact: contactView({ foundPhones, foundEmails, manual }),
 });
 
-// Checks what was typed in. Returns { value: { phone, phoneKeys, email, remarks, assignedTo } } or { error: 'message' }.
+// Checks what was typed in. Returns { value: { hrNames, hrProfiles, phone, phoneKeys, email, remarks, assignedTo } }
+// or { error: 'message' }. HR names and profile links: up to MAX_ENTRIES each, one per box.
 // Up to MAX_ENTRIES phone numbers and as many email addresses, each sent in its own box (a list) or
 // separated by commas; they are stored as one comma-separated text ("98765 43210, 080 4123 4567").
 // The same number or address twice is kept once. A wrong entry is named in the message. Empty = nothing entered.
@@ -57,6 +78,20 @@ export function parseFollowUpInput(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'Send the details as JSON.' };
   const remarks = (body.remarks == null ? '' : String(body.remarks)).replace(/\r\n?/g, '\n').trim();
   if (remarks.length > REMARKS_LIMIT) return { error: `Remarks is too long (at most ${REMARKS_LIMIT} characters).` };
+
+  // The HR people's names, and links to their profiles (one per box; pasted ones split at spaces).
+  const typedHrNames = entriesOf(body.hrName, /[,;\n]/);
+  const longHrName = typedHrNames.find((n) => n.length > HR_NAME_LIMIT);
+  if (longHrName) return { error: `HR name: "${clip(longHrName)}" is too long for a name (at most ${HR_NAME_LIMIT} characters).` };
+  const hrNames = typedHrNames.filter((n, i) => typedHrNames.findIndex((m) => m.toLowerCase() === n.toLowerCase()) === i);
+  if (hrNames.length > MAX_ENTRIES) return { error: `HR name: at most ${MAX_ENTRIES} names per job.` };
+
+  const typedProfiles = entriesOf(body.hrProfile, /[\s,;]+/);
+  const badProfile = typedProfiles.find((p) => p.length > PROFILE_LIMIT || !profileUrl(p));
+  if (badProfile) return { error: `HR profile: "${clip(badProfile)}" is not a web link. Enter it like linkedin.com/in/name.` };
+  const links = typedProfiles.map(profileUrl);
+  const hrProfiles = links.filter((u, i) => links.findIndex((v) => profileKey(v) === profileKey(u)) === i);
+  if (hrProfiles.length > MAX_ENTRIES) return { error: `HR profile: at most ${MAX_ENTRIES} links per job.` };
 
   const typedPhones = entriesOf(body.phone, /[,;/]/);
   const digits = (p) => p.replace(/\D/g, '').length;
@@ -80,15 +115,24 @@ export function parseFollowUpInput(body) {
   const assignedTo = typedNames.filter((n, i) => typedNames.findIndex((m) => m.toLowerCase() === n.toLowerCase()) === i);
   if (assignedTo.length > MAX_STUDENTS) return { error: `Assign to: at most ${MAX_STUDENTS} students per job.` };
 
-  return { value: { phone: phones.join(', '), phoneKeys: phones.map(phoneKey), email: emails.join(', '), remarks, assignedTo } };
+  return { value: { hrNames, hrProfiles, phone: phones.join(', '), phoneKeys: phones.map(phoneKey), email: emails.join(', '), remarks, assignedTo } };
 }
 
 const clip = (text) => (text.length > 40 ? `${text.slice(0, 40)}…` : text);
 
 // The `manual` field to store from what was typed in, or null when nothing is entered (the field is removed).
-export function manualRecord({ phone, phoneKeys, email, remarks, assignedTo = [] }, now) {
-  if (!phone && !email && !remarks && !assignedTo.length) return null;
-  return { phone, phoneKeys, email, remarks, ...(assignedTo.length ? { assignedTo } : {}), updatedAt: now };
+export function manualRecord({ hrNames = [], hrProfiles = [], phone, phoneKeys, email, remarks, assignedTo = [] }, now) {
+  if (!hrNames.length && !hrProfiles.length && !phone && !email && !remarks && !assignedTo.length) return null;
+  return {
+    ...(hrNames.length ? { hrNames } : {}),
+    ...(hrProfiles.length ? { hrProfiles } : {}),
+    phone,
+    phoneKeys,
+    email,
+    remarks,
+    ...(assignedTo.length ? { assignedTo } : {}),
+    updatedAt: now,
+  };
 }
 
 // Every phone number a stored job has, as phoneKeys: typed in, and found in its postings.

@@ -4,13 +4,14 @@ import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
 import { EXCLUDED_COMPANIES } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
-import { Activity, CollectorRun, Job, NonFilteredJob } from '../models.js';
+import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
+import { contactKey, outcomeChanges, parseOutcomeInput } from '../outcomes.js';
 import { requirePermission } from '../auth.js';
 import { SKILL_NAMES, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
-import { PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
+import { MAX_STUDENTS, PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
 
 const router = express.Router();
 const DAY_MS = 86_400_000;
@@ -166,7 +167,8 @@ function jobFilter(query, { start, end }) {
   const search = String(query.q ?? '').trim();
   if (search) {
     const rx = new RegExp(escapeRegex(search), 'i');
-    filter.$or = [{ title: rx }, { company: rx }, { 'manual.assignedTo': rx }]; // a student's name finds the jobs assigned to them
+    // A student's name finds the jobs assigned to them; an HR person's name finds their jobs.
+    filter.$or = [{ title: rx }, { company: rx }, { 'manual.assignedTo': rx }, { 'manual.hrNames': rx }];
   }
   return filter;
 }
@@ -547,10 +549,13 @@ router.get('/jobs', wrap(async (req, res) => {
   const filter = jobFilter(req.query, range);
   const pageSize = Math.min(clampDays(req.query.limit, 25, 100), 100);
   const page = clampDays(req.query.page, 1, 100_000);
-  // withContact: how many of these jobs have an HR phone, email or note (typed in, or found in the post).
-  // An HR phone, email or note (typed in, or found in the posting). Students assigned alone don't count.
+  // withContact: how many of these jobs have HR details: an HR name, profile link, phone, email or note
+  // (typed in), or a phone or email found in the posting. Students assigned alone don't count.
   const typed = (field) => ({ [`manual.${field}`]: { $nin: [null, ''] } });
-  const hasContact = { $or: [typed('phone'), typed('email'), typed('remarks'), { 'foundPhones.0': { $exists: true } }, { 'foundEmails.0': { $exists: true } }] };
+  const listed = (field) => ({ [`manual.${field}.0`]: { $exists: true } });
+  const hasContact = {
+    $or: [listed('hrNames'), listed('hrProfiles'), typed('phone'), typed('email'), typed('remarks'), { 'foundPhones.0': { $exists: true } }, { 'foundEmails.0': { $exists: true } }],
+  };
   const [items, total, withContact] = await Promise.all([
     J.find(filter, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
     J.countDocuments(filter),
@@ -715,15 +720,131 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
     ]),
     Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean(),
   ]);
+  const shown = rows.slice(0, MAX_PERFORMANCE_ROWS);
+  // Each number/email's follow-up (who it was given to, how it went): the same for every row of it.
+  const outcomes = await ContactOutcome.find({ job: { $in: [...new Set(shown.map((r) => String(r.job.id)))] } }).lean();
+  const outcomeOf = new Map(outcomes.map((o) => [`${o.job}|${o.field}|${o.key}`, o]));
   res.json({
     days: range.days,
     from: range.from,
     to: range.to,
     since: first?.at ?? null, // when the activity record began: nothing before it can be counted
-    rows: rows.slice(0, MAX_PERFORMANCE_ROWS),
+    rows: shown.map((row) => {
+      const key = contactKey(row.field, row.value);
+      const o = outcomeOf.get(`${row.job.id}|${row.field}|${key}`);
+      return { ...row, key, outcome: o ? { student: o.student ?? '', status: o.status ?? '', note: o.note ?? '', updatedAt: o.updatedAt ?? null, updatedBy: o.updatedBy ?? null } : null };
+    }),
     truncated: rows.length > MAX_PERFORMANCE_ROWS,
+    students: await knownStudents(), // names to suggest when assigning
   });
 }));
+
+// Every student name used so far (jobs' "Assigned to" lists and the report's assignments), each once, A–Z.
+async function knownStudents() {
+  const lists = await Promise.all([Job.distinct('manual.assignedTo'), NonFilteredJob.distinct('manual.assignedTo'), ContactOutcome.distinct('student')]);
+  const names = new Map();
+  for (const name of lists.flat()) if (name && !names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
+  return [...names.values()].sort((a, b) => a.localeCompare(b)).slice(0, 2000);
+}
+
+// One number or email's follow-up, from the performance report: the student it was given to, or how it
+// went (each saved on its own, as soon as it is chosen). The student is also put on the job's "Assigned
+// to" list, and a student no longer given any of the job's numbers/emails is taken off it again. Recorded
+// in the activity record under the person's email, like any change.
+router.put('/outcomes', requirePermission('record-outcomes'), express.json({ limit: '4kb' }), wrap(async (req, res) => {
+  const input = parseOutcomeInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const { job: jobId, field, value, key } = input.value;
+  const fields = { manual: 1, title: 1, company: 1, course: 1 };
+  let model = Job;
+  let job = await Job.findById(jobId, fields).lean();
+  if (!job) {
+    model = NonFilteredJob;
+    job = await NonFilteredJob.findById(jobId, fields).lean();
+  }
+  if (!job) return res.status(404).json({ error: 'Job not found. It may have been removed.' });
+
+  const current = await ContactOutcome.findOne({ job: job._id, field, key }).lean();
+  const was = { student: current?.student ?? '', status: current?.status ?? '', note: current?.note ?? '' };
+  const next = {
+    student: 'student' in input.value ? input.value.student : was.student,
+    status: 'status' in input.value ? input.value.status : was.status,
+    note: 'status' in input.value ? input.value.note : was.note,
+  };
+
+  // The job's "Assigned to" list: the new student on it; the old one off it unless another of the job's
+  // numbers/emails is still given to them.
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const students = job.manual?.assignedTo ?? [];
+  let nextStudents = students;
+  if (next.student && !students.some((s) => same(s, next.student))) nextStudents = [...students, next.student];
+  if (was.student && !same(was.student, next.student)) {
+    const stillGiven = await ContactOutcome.exists({
+      job: job._id,
+      ...(current ? { _id: { $ne: current._id } } : {}),
+      student: new RegExp(`^${escapeRegex(was.student)}$`, 'i'),
+    });
+    if (!stillGiven) nextStudents = nextStudents.filter((s) => !same(s, was.student));
+  }
+  if (nextStudents.length > MAX_STUDENTS && nextStudents.length > students.length) {
+    return res.status(400).json({ error: `Assigned to: this job already has ${MAX_STUDENTS} students.` });
+  }
+
+  const changes = outcomeChanges(field, value, was, next);
+  const added = nextStudents.filter((s) => !students.includes(s));
+  const removed = students.filter((s) => !nextStudents.includes(s));
+  if (added.length || removed.length) {
+    changes.push({ field: 'assignedTo', change: !students.length ? 'added' : !nextStudents.length ? 'removed' : 'edited', before: students, after: nextStudents, added, removed });
+  }
+  const answer = (o) => ({ outcome: o && (o.student || o.status) ? { student: o.student ?? '', status: o.status ?? '', note: o.note ?? '', updatedAt: o.updatedAt ?? null, updatedBy: o.updatedBy ?? null } : null, assignedTo: nextStudents });
+  if (!changes.length) return res.json(answer(current));
+
+  // As for HR details: the record first, so nothing changes without one; removed again if the save fails.
+  const now = new Date();
+  const entry = await Activity.create({
+    at: now,
+    actor: req.person,
+    action: overallAction(changes),
+    job: { id: job._id, set: model === Job ? 'filtered' : 'nonfiltered', title: job.title, company: job.company, course: job.course },
+    changes,
+  });
+  try {
+    // Only what was sent is written (the student, or the remark), so a student and a remark saved at
+    // the same moment don't undo each other. Nothing left on it: the follow-up goes.
+    const set = { value, updatedAt: now, updatedBy: { email: req.person.email, name: req.person.name ?? '' } };
+    if ('student' in input.value) set.student = next.student;
+    if ('status' in input.value) Object.assign(set, { status: next.status, note: next.note });
+    let saved = await ContactOutcome.findOneAndUpdate({ job: job._id, field, key }, { $set: set }, { upsert: true, returnDocument: 'after' }).lean();
+    if (!saved.student && !saved.status) {
+      await ContactOutcome.deleteOne({ _id: saved._id, student: { $in: [null, ''] }, status: { $in: [null, ''] } });
+      saved = null;
+    }
+    // The job's list: one name added or taken off at a time (not the whole list written back), then
+    // the job's typed-in details removed if nothing at all is left in them.
+    if (added.length) await model.updateOne({ _id: job._id }, { $addToSet: { 'manual.assignedTo': { $each: added } }, $set: { 'manual.updatedAt': now } });
+    if (removed.length) {
+      await model.updateOne({ _id: job._id }, { $pull: { 'manual.assignedTo': { $in: removed } }, $set: { 'manual.updatedAt': now } });
+      const after = await model.findById(job._id, { manual: 1 }).lean();
+      if (after?.manual && !manualRecord({ ...contactValue(after.manual), assignedTo: after.manual.assignedTo ?? [] }, now)) {
+        await model.updateOne({ _id: job._id }, { $unset: { manual: 1 } });
+      }
+    }
+    res.json(answer(saved));
+  } catch (err) {
+    await Activity.deleteOne({ _id: entry._id }).catch((e) => console.error(`Could not remove activity ${entry._id}: ${e.message}`));
+    throw err;
+  }
+}));
+
+// A job's stored typed-in details in manualRecord's form (to change only its students).
+const contactValue = (manual) => ({
+  hrNames: manual?.hrNames ?? [],
+  hrProfiles: manual?.hrProfiles ?? [],
+  phone: manual?.phone ?? '',
+  phoneKeys: manual?.phoneKeys ?? [],
+  email: manual?.email ?? '',
+  remarks: manual?.remarks ?? '',
+});
 
 // A non-filtered job's leftOutBy, in words.
 const LEFT_OUT_REASONS = {
@@ -746,7 +867,7 @@ router.get('/jobs.csv', wrap(async (req, res) => {
   const nonFiltered = req.query.view === 'nonfiltered';
   const header = [
     'First seen (IST)', 'Posted (IST)', 'Course', 'Title', 'Company', 'Cities', 'Experience', 'Salary', 'Listed on',
-    'Phone', 'Email', 'Assigned to', 'Remarks', ...(nonFiltered ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
+    'HR name', 'HR profile', 'Phone', 'Email', 'Assigned to', 'Remarks', ...(nonFiltered ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
   ];
   const lines = jobs.map(jobRow).map((job) =>
     [
@@ -759,6 +880,8 @@ router.get('/jobs.csv', wrap(async (req, res) => {
       experienceLabel(job),
       job.salaryText,
       (job.platforms ?? []).join('; '),
+      job.contact.hrNames.join('; '),
+      job.contact.hrProfiles.join(' '),
       job.contact.phone,
       job.contact.email,
       job.contact.assignedTo.join('; '),

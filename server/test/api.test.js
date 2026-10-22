@@ -8,7 +8,7 @@ import { MongoMemoryServer } from 'mongodb-memory-server-core';
 import { config } from '../src/config.js';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
-import { Activity, CollectorRun, Job, NonFilteredJob } from '../src/models.js';
+import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob } from '../src/models.js';
 import { parseFollowUpInput } from '../src/api/followUp.js';
 import { COURSES } from '../src/config/courses.js';
 import { SKILL_NAMES } from '../src/normalize.js';
@@ -144,7 +144,7 @@ test('HR phone, email and remarks can be typed in for a job, and are shown inste
   assert.deepEqual([contact.phone, contact.phoneSource, contact.email, contact.emailSource], ['+91 70000 12345', 'manual', 'careers@company2.in', 'posting']);
 
   const csv = await (await fetch(`${base}/jobs.csv?days=1`)).text();
-  assert.match(csv.split('\r\n')[0], /Listed on,Phone,Email,Assigned to,Remarks,/);
+  assert.match(csv.split('\r\n')[0], /Listed on,HR name,HR profile,Phone,Email,Assigned to,Remarks,/);
   assert.match(csv, /98765 43210,"hr@company1.com, anil@company1.com",,Called; send CVs Monday/);
 
   // Clearing everything removes the typed-in details.
@@ -193,7 +193,7 @@ test('the same number typed twice in one entry is kept once', () => {
   assert.deepEqual(parseFollowUpInput({ phone: '98450 12345' }).value.phoneKeys, ['9845012345']);
 });
 
-test('several phone numbers and emails, one per box: up to 5 each, kept once, a wrong one named', () => {
+test('several phone numbers and emails, one per box: up to 10 each, kept once, a wrong one named', () => {
   const ok = parseFollowUpInput({
     phone: ['98450 12345', '', ' 080 4123 4567 ', '+91 98450-12345'],
     email: ['hr@acme.in', 'HR@acme.in', 'anil@acme.in', ''],
@@ -206,10 +206,11 @@ test('several phone numbers and emails, one per box: up to 5 each, kept once, a 
   assert.equal(parseFollowUpInput({ email: ['hr@acme.in', 'hr at acme.in'] }).error, 'Email: "hr at acme.in" is not an email address. Enter it like hr@company.com.');
   assert.equal(parseFollowUpInput({ email: 'a@acme.in b@acme.in' }).value.email, 'a@acme.in, b@acme.in', 'pasted with spaces');
 
-  const six = ['90000 00001', '90000 00002', '90000 00003', '90000 00004', '90000 00005', '90000 00006'];
-  assert.equal(parseFollowUpInput({ phone: six.slice(0, 5) }).value.phoneKeys.length, 5);
-  assert.equal(parseFollowUpInput({ phone: six }).error, 'Phone: at most 5 numbers per job.');
-  assert.equal(parseFollowUpInput({ email: six.map((_, i) => `hr${i}@acme.in`) }).error, 'Email: at most 5 addresses per job.');
+  const eleven = Array.from({ length: 11 }, (_, i) => `90000 000${String(i + 10)}`);
+  assert.equal(parseFollowUpInput({ phone: eleven.slice(0, 10) }).value.phoneKeys.length, 10);
+  assert.equal(parseFollowUpInput({ phone: eleven }).error, 'Phone: at most 10 numbers per job.');
+  assert.equal(parseFollowUpInput({ email: eleven.slice(0, 10).map((_, i) => `hr${i}@acme.in`) }).value.email.split(', ').length, 10);
+  assert.equal(parseFollowUpInput({ email: eleven.map((_, i) => `hr${i}@acme.in`) }).error, 'Email: at most 10 addresses per job.');
 });
 
 test('a job can be assigned to several students: saved, shown, searched, in the CSV, not counted as HR details', async () => {
@@ -244,6 +245,48 @@ test('a job can be assigned to several students: saved, shown, searched, in the 
 
   await put({ phone: [], email: [], remarks: '', assignedTo: [] });
   assert.equal((await Job.findById(job1._id).lean()).manual, undefined, 'nothing left: removed');
+});
+
+test('HR names and profile links: checked, saved, shown, searched, in the CSV and the activity record, counted as HR details', async () => {
+  // Checked: names once each; links are web addresses ("https://" added), each page once.
+  const parsed = parseFollowUpInput({
+    hrName: ['Riya Sharma', '', ' riya  sharma ', 'Anil Kumar'],
+    hrProfile: ['linkedin.com/in/riya-sharma', 'https://www.linkedin.com/in/riya-sharma/', 'https://naukri.com/recruiters/anil'],
+  }).value;
+  assert.deepEqual(parsed.hrNames, ['Riya Sharma', 'Anil Kumar']);
+  assert.deepEqual(parsed.hrProfiles, ['https://linkedin.com/in/riya-sharma', 'https://naukri.com/recruiters/anil']);
+  for (const bad of ['javascript:alert(1)', 'mailto:hr@acme.in', 'riya', 'https://user:pass@acme.in']) {
+    assert.match(parseFollowUpInput({ hrProfile: [bad] }).error, /^HR profile: ".*" is not a web link/, bad);
+  }
+  assert.match(parseFollowUpInput({ hrName: ['x'.repeat(81)] }).error, /^HR name: ".*" is too long/);
+  assert.equal(parseFollowUpInput({ hrName: Array.from({ length: 11 }, (_, i) => `HR ${i}`) }).error, 'HR name: at most 10 names per job.');
+  assert.equal(parseFollowUpInput({ hrProfile: Array.from({ length: 11 }, (_, i) => `acme.in/hr/${i}`) }).error, 'HR profile: at most 10 links per job.');
+
+  const job1 = await Job.findOne({ fingerprint: 'f1' }).lean();
+  await putAs(job1._id, empty);
+  const list = async (q = '') => (await fetch(`${base}/jobs?days=1&limit=100${q}`)).json();
+  const before = (await list()).withContact;
+
+  const res = await putAs(job1._id, { ...empty, hrName: ['Riya Sharma'], hrProfile: ['linkedin.com/in/riya-sharma'] }, 'RESEARCH_TEAM:asha@example.com');
+  assert.equal(res.status, 200);
+  const { contact } = await res.json();
+  assert.deepEqual([contact.hrNames, contact.hrProfiles], [['Riya Sharma'], ['https://linkedin.com/in/riya-sharma']]);
+  assert.deepEqual((await Job.findById(job1._id).lean()).manual.hrNames, ['Riya Sharma'], 'stored');
+  assert.equal((await list()).withContact, before + 1, 'an HR name or profile counts as HR details');
+  assert.deepEqual((await list('&q=riya%20sharma')).items.map((j) => j.title), ['Data Analyst 1'], "an HR person's name finds their jobs");
+
+  const csv = await (await fetch(`${base}/jobs.csv?days=1&q=riya`)).text();
+  assert.match(csv.split('\r\n')[1], /,Riya Sharma,https:\/\/linkedin\.com\/in\/riya-sharma,/);
+
+  const [entry] = await Activity.find().sort({ at: -1 }).limit(1).lean();
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added]), [['hrName', 'added', ['Riya Sharma']], ['hrProfile', 'added', ['https://linkedin.com/in/riya-sharma']]]);
+  const perf = await (await fetch(`${base}/performance?days=1`)).json();
+  assert.ok(perf.rows.every((r) => r.field === 'phone' || r.field === 'email'), 'the performance report counts phone numbers and emails only');
+
+  // Not sent again: removed (the dashboard always sends every field).
+  await putAs(job1._id, { ...empty, remarks: 'Called' });
+  assert.equal((await Job.findById(job1._id).lean()).manual.hrNames, undefined);
+  await putAs(job1._id, empty);
 });
 
 test('a second number already on another job is refused, naming that number', async () => {
@@ -871,4 +914,101 @@ test('performance report: each phone number and email a person added, once, with
   // Only for signed-in people with an allowed role.
   assert.equal((await get('days=1', 'expired')).status, 401);
   assert.equal((await get('days=1', 'STUDENT:x@example.com')).status, 403);
+});
+
+test('follow-up of each number/email: a student and a remark, saved one at a time, on the job too, recorded, shown in the report', async () => {
+  const job4 = await Job.findOne({ fingerprint: 'f4' }).lean();
+  await putAs(job4._id, empty);
+  assert.equal((await putAs(job4._id, { ...empty, phone: ['93456 70041'], email: ['hr@zeta.in'] }, 'RESEARCH_TEAM:asha@example.com')).status, 200);
+  const caller = 'PLACEMENT_STAFF:caller@example.com';
+  const put = async (body, auth = caller) => {
+    const res = await fetch(`${base}/outcomes`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  };
+  const phone = { job: String(job4._id), field: 'phone', value: '93456 70041' };
+  const email = { job: String(job4._id), field: 'email', value: 'hr@zeta.in' };
+  const latest = async () => (await Activity.find().sort({ at: -1, _id: -1 }).limit(1).lean())[0];
+  const students = async () => (await Job.findById(job4._id).lean()).manual?.assignedTo ?? [];
+
+  // A student: saved, and put on the job's "Assigned to" list; recorded under the caller's email.
+  let res = await put({ ...phone, student: 'Kavya Rao' });
+  assert.equal(res.status, 200);
+  assert.deepEqual([res.body.outcome.student, res.body.outcome.status, res.body.assignedTo], ['Kavya Rao', '', ['Kavya Rao']]);
+  assert.deepEqual(await students(), ['Kavya Rao']);
+  let entry = await latest();
+  assert.equal(entry.actor.email, 'caller@example.com');
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.after, c.contact?.value]), [
+    ['contactStudent', 'added', ['Kavya Rao'], '93456 70041'],
+    ['assignedTo', 'added', ['Kavya Rao'], undefined],
+  ]);
+
+  // A remark, then "Others" in their own words (which must be typed).
+  res = await put({ ...phone, status: 'dnp' });
+  assert.deepEqual([res.body.outcome.student, res.body.outcome.status], ['Kavya Rao', 'dnp'], 'the student is kept');
+  assert.deepEqual((await latest()).changes.map((c) => [c.field, c.change, c.after]), [['contactRemark', 'added', ['DNP']]]);
+  assert.deepEqual((await put({ ...phone, status: 'other', note: '  ' })).body, { error: 'Remark: type what happened (Others).' });
+  res = await put({ ...phone, status: 'other', note: 'Call after 5 pm' });
+  entry = await latest();
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.before, c.after]), [['contactRemark', 'edited', ['DNP'], ['Others: Call after 5 pm']]]);
+  const count = await Activity.countDocuments();
+  await put({ ...phone, status: 'other', note: 'Call after 5 pm' });
+  assert.equal(await Activity.countDocuments(), count, 'saved as it was: nothing recorded');
+
+  // The email: "Wrong number" reads "Wrong email"; given to Aman.
+  await put({ ...email, status: 'wrong' });
+  assert.deepEqual((await latest()).changes[0].after, ['Wrong email']);
+  await put({ ...email, student: 'Aman Gupta' });
+  assert.deepEqual(await students(), ['Kavya Rao', 'Aman Gupta']);
+
+  // The report: each row with its follow-up, and the students to suggest.
+  const report = await (await fetch(`${base}/performance?days=1`)).json();
+  const rowOf = (value) => report.rows.find((r) => r.value === value && String(r.job.id) === String(job4._id));
+  assert.deepEqual(
+    [rowOf('93456 70041').key, rowOf('93456 70041').outcome.student, rowOf('93456 70041').outcome.status, rowOf('93456 70041').outcome.note, rowOf('93456 70041').outcome.updatedBy.email],
+    ['9345670041', 'Kavya Rao', 'other', 'Call after 5 pm', 'caller@example.com'],
+  );
+  assert.deepEqual([rowOf('hr@zeta.in').outcome.student, rowOf('hr@zeta.in').outcome.status], ['Aman Gupta', 'wrong']);
+  assert.ok(report.students.includes('Kavya Rao') && report.students.includes('Aman Gupta'));
+  assert.ok(report.rows.every((r) => r.field === 'phone' || r.field === 'email'), 'follow-ups are not counted as contact details added');
+
+  // The same number written another way is the same number; the phone goes to Aman: Kavya leaves the
+  // job's list (no other number/email of it is hers), Aman stays once.
+  res = await put({ ...phone, value: '+91 93456 70041', student: 'aman gupta' });
+  assert.equal(res.body.outcome.status, 'other', 'same record');
+  assert.deepEqual(await students(), ['Aman Gupta']);
+  entry = await latest();
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added, c.removed]), [
+    ['contactStudent', 'edited', ['aman gupta'], ['Kavya Rao']],
+    ['assignedTo', 'edited', [], ['Kavya Rao']],
+  ]);
+  // Taken off the phone, Aman stays on the job: the email is still his.
+  await put({ ...phone, student: '' });
+  assert.deepEqual(await students(), ['Aman Gupta']);
+  // Nothing left on the phone: its follow-up is removed.
+  res = await put({ ...phone, status: '' });
+  assert.equal(res.body.outcome, null);
+  assert.equal(await ContactOutcome.countDocuments({ job: job4._id, field: 'phone' }), 0);
+
+  // Editing the job's details in its window leaves the follow-ups alone.
+  await putAs(job4._id, { ...empty, phone: ['93456 70041'], email: ['hr@zeta.in'], assignedTo: ['Aman Gupta'], remarks: 'Called' });
+  assert.equal((await ContactOutcome.findOne({ job: job4._id, field: 'email' }).lean()).status, 'wrong');
+
+  // Mistakes and sign-in.
+  assert.equal((await put({ ...phone, status: 'constructor' })).status, 400);
+  assert.equal((await put({ ...phone, field: 'fax', status: 'dnp' })).status, 400);
+  assert.equal((await put({ ...phone })).status, 400, 'nothing to change');
+  assert.equal((await put({ ...phone, job: '0123456789abcdef01234567', status: 'dnp' })).status, 404);
+  assert.equal((await put({ ...phone, status: 'dnp' }, 'expired')).status, 401);
+  assert.equal((await put({ ...phone, status: 'dnp' }, 'STUDENT:x@example.com')).status, 403);
+});
+
+test('a student and a remark saved at the same moment are both kept', async () => {
+  const job2 = await Job.findOne({ fingerprint: 'f2' }).lean();
+  const put = (body) =>
+    fetch(`${base}/outcomes`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer PLACEMENT_STAFF:caller@example.com' }, body: JSON.stringify({ job: String(job2._id), field: 'phone', value: '98450 12345', ...body }) });
+  const [a, b] = await Promise.all([put({ student: 'Neha Verma' }), put({ status: 'cv-shared' })]);
+  assert.deepEqual([a.status, b.status], [200, 200]);
+  const saved = await ContactOutcome.findOne({ job: job2._id, field: 'phone' }).lean();
+  assert.deepEqual([saved.student, saved.status], ['Neha Verma', 'cv-shared']);
+  assert.ok((await Job.findById(job2._id).lean()).manual.assignedTo.includes('Neha Verma'));
 });

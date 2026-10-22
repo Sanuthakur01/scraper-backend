@@ -1,7 +1,7 @@
 // What changed in a job's HR details, for the activity record (models.js Activity): compared field
 // by field between what the dashboard showed before a save and what it shows after.
 //
-// Lists (phone numbers, emails, students): which values were added and which removed. A phone number
+// Lists (HR names, HR profile links, phone numbers, emails, students): which values were added and which removed. A phone number
 // written differently ("98765 43210" -> "+91 98765 43210") is the same number, so it isn't counted as
 // removed and added again; the field then shows as edited with its old and new spelling.
 
@@ -11,6 +11,8 @@ const split = (value) => String(value ?? '').split(/\s*,\s*/).filter(Boolean);
 
 // Each field: its values from a contact view (followUp.js contactView), and how two values are compared.
 const FIELDS = [
+  { field: 'hrName', values: (c) => c.hrNames ?? [], key: (v) => v.toLowerCase() },
+  { field: 'hrProfile', values: (c) => c.hrProfiles ?? [], key: (v) => v.toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/\/+$/, '') },
   { field: 'phone', values: (c) => split(c.phone), key: (v) => phoneKey(v) || v },
   { field: 'email', values: (c) => split(c.email), key: (v) => v.toLowerCase() },
   { field: 'assignedTo', values: (c) => c.assignedTo ?? [], key: (v) => v.toLowerCase() },

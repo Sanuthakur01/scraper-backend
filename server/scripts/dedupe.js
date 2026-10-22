@@ -17,7 +17,10 @@ function mergeManual(keep, other) {
   if (!other) return keep;
   if (!keep) return other;
   const remarks = [keep.remarks, other.remarks].filter(Boolean);
+  const both = (field) => [...new Set([...(keep[field] ?? []), ...(other[field] ?? [])])];
   return {
+    hrNames: both('hrNames'), // both copies' HR names and profile links
+    hrProfiles: both('hrProfiles'),
     phone: keep.phone || other.phone || '',
     phoneKeys: (keep.phone ? keep.phoneKeys : other.phoneKeys) ?? [],
     email: keep.email || other.email || '',
