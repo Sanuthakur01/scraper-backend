@@ -1013,3 +1013,78 @@ test('a student and a remark saved at the same moment are both kept', async () =
   assert.deepEqual([saved.student, saved.status], ['Neha Verma', 'cv-shared']);
   assert.ok((await Job.findById(job2._id).lean()).manual.assignedTo.includes('Neha Verma'));
 });
+
+test('search box: companies however spelled, HR names, emails and phone numbers written any way, kept and left-out jobs', async () => {
+  const now = Date.now();
+  const job = (n, extra) => ({
+    fingerprint: `srch${n}`, title: `Search Analyst ${n}`, company: 'Quokka Data Labs Pvt Ltd', course: 'data-analyst', cities: ['Pune'],
+    firstSeenAt: new Date(now - n * HOUR), lastSeenAt: new Date(now - n * HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'],
+    sourceKeys: [`SR:${n}`], links: { Naukri: `https://example.com/sr${n}` }, ...extra,
+  });
+  const [kept] = await Job.create([
+    job(1, { manual: { phone: '+91 97001 23456', phoneKeys: ['9700123456'], email: 'meera.hr@quokka.in', hrNames: ['Meera Pillai'], updatedAt: new Date() } }),
+    job(2, { company: 'Quokka Data Labs', course: 'data-science' }),
+  ]);
+  const [left] = await NonFilteredJob.create([job(3, { company: 'Quokka Data Labs India', leftOutBy: 'experience', foundPhones: ['080-4123-9876'] })]);
+  const search = async (q, token = '') => {
+    const res = await fetch(`${base}/search?q=${encodeURIComponent(q)}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    return { status: res.status, body: await res.json() };
+  };
+  try {
+    // A company: once, all its spellings, kept and left out.
+    let { body } = await search('quokka');
+    assert.equal(body.kind, 'text');
+    assert.deepEqual(body.companies.map((c) => [c.name, c.openings, c.leftOut]), [['Quokka Data Labs', 2, 1]], 'a tie between spellings: the shortest');
+    assert.equal(body.companies[0].courses['data-science'], 1);
+    assert.deepEqual(body.contacts.map((h) => h.matches), [[{ field: 'email', value: 'meera.hr@quokka.in' }]], 'its email matches the word too');
+
+    // An HR name, any case.
+    ({ body } = await search('meera'));
+    assert.deepEqual(body.companies, []);
+    assert.equal(body.contacts.length, 1);
+    assert.equal(body.contacts[0].job._id, String(kept._id));
+    assert.equal(body.contacts[0].set, 'filtered');
+    assert.deepEqual(body.contacts[0].matches.map((m) => m.field), ['hrName', 'email']);
+    assert.equal(body.contacts[0].job.contact.phone, '+91 97001 23456', 'the job comes as the job list shows it');
+
+    // A phone number: with or without the country code, spaces or dashes, or just a part of it.
+    for (const q of ['9700123456', '+91 97001-23456', '097001 23456', '001 2345']) {
+      ({ body } = await search(q));
+      assert.equal(body.kind, 'phone', q);
+      assert.deepEqual(body.contacts.map((h) => h.matches[0].value), ['+91 97001 23456'], q);
+    }
+    ({ body } = await search('41239876'));
+    assert.deepEqual(body.contacts.map((h) => [h.set, h.job._id, h.matches[0].value]), [['nonfiltered', String(left._id), '080-4123-9876']], 'a number from a left-out post');
+
+    // Too short, nothing, signed out or a role that can't see.
+    ({ body } = await search('9'));
+    assert.equal(body.kind, 'short');
+    assert.deepEqual([body.companies, body.contacts], [[], []]);
+    ({ body } = await search('zzzz-nothing'));
+    assert.deepEqual([body.companies, body.contacts], [[], []]);
+    assert.equal((await search('quokka', 'expired')).status, 401);
+    assert.equal((await search('quokka', 'STUDENT:x@example.com')).status, 403);
+
+    // A company's openings (the search result, or a hiring partner): every spelling, newest first.
+    const key = (await search('quokka')).body.companies[0].key;
+    const jobsOf = async (params) => (await fetch(`${base}/companies/jobs?${new URLSearchParams({ key, ...params })}`)).json();
+    let list = await jobsOf({ all: '1' });
+    assert.deepEqual(list.items.map((j) => j.title), ['Search Analyst 1', 'Search Analyst 2', 'Search Analyst 3']);
+    assert.equal(list.total, 3);
+    assert.equal(list.name, 'Quokka Data Labs');
+    assert.equal(list.items[2].leftOutBy, 'experience');
+    list = await jobsOf({ days: '90' });
+    assert.deepEqual(list.items.map((j) => j.title), ['Search Analyst 1', 'Search Analyst 2'], 'one set: the view\'s');
+    assert.equal(list.days, 90);
+    list = await jobsOf({ view: 'nonfiltered' });
+    assert.deepEqual(list.items.map((j) => j.title), ['Search Analyst 3']);
+    assert.equal((await fetch(`${base}/companies/jobs`)).status, 400);
+
+    // Hiring partners say which key is theirs.
+    const partner = (await (await fetch(`${base}/partners`)).json()).partners.find((p) => p.name.startsWith('Quokka'));
+    assert.equal(partner.key, key);
+  } finally {
+    await Job.deleteMany({ fingerprint: /^srch/ });
+    await NonFilteredJob.deleteMany({ fingerprint: /^srch/ });
+  }
+});

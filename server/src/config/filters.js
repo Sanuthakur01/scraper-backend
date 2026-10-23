@@ -37,6 +37,10 @@ export function leftOutReason({ company, experienceMin }) {
   return null;
 }
 
+// A non-filtered job's leftOutBy: what the keep rules say, else 'extra-search' when it passes them but an
+// extra search found it and no main search kept it (fromExtraSearch; extraSearchTerms in config/courses.js).
+export const nonFilteredReason = (job) => leftOutReason(job) ?? (job.fromExtraSearch ? 'extra-search' : null);
+
 // "2+" (no upper limit) or "2-5", for messages.
 export const experienceRangeText = () =>
   config.experience.max == null ? `${config.experience.min}+` : `${config.experience.min}-${config.experience.max}`;

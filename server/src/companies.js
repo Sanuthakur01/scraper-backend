@@ -48,7 +48,7 @@ function contactsOf(jobs) {
 export function hiringPartners(jobs, { minOpenings = 2 } = {}) {
   return groupByCompany(jobs)
     .filter((group) => group.jobs.length >= minOpenings)
-    .map(({ name, jobs: list }) => {
+    .map(({ key, name, jobs: list }) => {
       const courses = Object.fromEntries(COURSES.map((c) => [c.id, 0]));
       const cities = new Map();
       for (const job of list) {
@@ -56,6 +56,7 @@ export function hiringPartners(jobs, { minOpenings = 2 } = {}) {
         for (const city of job.cities ?? []) if (!VAGUE_CITIES.has(city)) cities.set(city, (cities.get(city) ?? 0) + 1);
       }
       return {
+        key, // which jobs are this company's (GET /companies/jobs?key=)
         name,
         openings: list.length,
         courses,

@@ -6,7 +6,7 @@
 // --days N (1-30): search postings from the last N days instead of the last day, e.g. a one-off
 // 30-day backfill: `npm run collect -- --days 30`. New jobs are then dated by when they were posted.
 import { config } from '../src/config.js';
-import { COURSES } from '../src/config/courses.js';
+import { COURSES, searchesOf } from '../src/config/courses.js';
 import { experienceRangeText } from '../src/config/filters.js';
 import { enabledSources } from '../src/config/sources.js';
 import { connectDb, disconnectDb } from '../src/db.js';
@@ -46,7 +46,7 @@ if (sources.some((s) => s.via === 'apify')) {
   if (!config.apifyToken) {
     linkedinProblem = 'APIFY_TOKEN is not set, so LinkedIn was skipped. Add it to .env (or set DISABLED_SOURCES=LinkedIn to stop this message).';
   } else {
-    const searches = COURSES.reduce((n, c) => n + c.searchTerms.length, 0);
+    const searches = COURSES.reduce((n, c) => n + searchesOf(c).length, 0);
     const credit = await checkApifyCredit(config.apifyToken, { searches, limitPerSearch: config.limitPerSearch });
     if (!credit.ok) {
       const resets = credit.resetsAt ? `; it resets on ${new Date(credit.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : '';

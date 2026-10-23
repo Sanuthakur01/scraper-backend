@@ -8,10 +8,11 @@ import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob } from '../
 import { contactChanges, overallAction } from '../activity.js';
 import { contactKey, outcomeChanges, parseOutcomeInput } from '../outcomes.js';
 import { requirePermission } from '../auth.js';
-import { SKILL_NAMES, phoneKey } from '../normalize.js';
+import { SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
 import { MAX_STUDENTS, PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
+import { searchEverything } from './search.js';
 
 const router = express.Router();
 
@@ -555,6 +556,46 @@ router.get('/partners.csv', wrap(async (req, res) => {
   res.send(`﻿${[header.join(','), ...lines].join('\r\n')}`);
 }));
 
+// ---------- One company's openings, and the search box ----------
+
+// One company's openings, newest first: every spelling of its name counts (companyKey), as in Hiring
+// partners. ?key= the company's key (a hiring partner's `key`, or a search result's). ?days= only the
+// jobs first found in the last N days (Hiring partners pass theirs); without it, every stored job.
+// ?all=1: kept and left-out jobs together (the search box), else the view's set. Signed in only.
+const COMPANY_JOBS_MAX = 300;
+
+router.get('/companies/jobs', requirePermission('view'), wrap(async (req, res) => {
+  const key = String(req.query.key ?? '').trim();
+  if (!key || key.length > 200) return res.status(400).json({ error: 'key must be a company key.' });
+  const days = req.query.days ? clampDays(req.query.days, PARTNER_DAYS, 90) : null;
+  const range = days ? await dayRange(days) : null;
+  const window = { company: { $nin: [null, ''] }, ...(range ? { firstSeenAt: { $gte: range.start, $lt: range.end } } : {}) };
+  const sets = req.query.all === '1' ? [Job, NonFilteredJob] : [jobsFor(req)];
+  const found = await Promise.all(
+    sets.map(async (J) => {
+      const spellings = (await J.distinct('company', window)).filter((name) => companyKey(name) === key);
+      if (!spellings.length) return { items: [], total: 0 };
+      const filter = { ...window, company: { $in: spellings } };
+      const [items, total] = await Promise.all([J.find(filter, JOB_FIELDS).sort(JOB_SORT).limit(COMPANY_JOBS_MAX).lean(), J.countDocuments(filter)]);
+      return { items, total };
+    }),
+  );
+  const items = found
+    .flatMap((f) => f.items)
+    .sort((a, b) => b.firstSeenAt - a.firstSeenAt || String(a._id).localeCompare(String(b._id)))
+    .slice(0, COMPANY_JOBS_MAX);
+  const spellings = new Map();
+  for (const job of items) spellings.set(job.company, (spellings.get(job.company) ?? 0) + 1);
+  const name = [...spellings].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0]?.[0] ?? '';
+  res.json({ key, name, days, total: found.reduce((n, f) => n + f.total, 0), items: items.map(jobRow) });
+}));
+
+// The search box on the dashboard: companies, HR names, phone numbers and emails, in kept and left-out
+// jobs alike (search.js). ?q= at least 2 letters or 3 digits. Signed in only.
+router.get('/search', requirePermission('view'), wrap(async (req, res) => {
+  res.json(await searchEverything(String(req.query.q ?? ''), { fields: JOB_FIELDS }));
+}));
+
 // ---------- Job lists ----------
 
 const JOB_FIELDS = {
@@ -870,6 +911,7 @@ const LEFT_OUT_REASONS = {
   'big-company': 'Large IT services firm',
   experience: 'Asks for less experience than the minimum',
   'no-experience': 'Experience not stated',
+  'extra-search': 'From the extra searches',
 };
 
 const istDateTime = (date) => (date ? new Date(date.getTime() + IST_OFFSET_MS).toISOString().slice(0, 16).replace('T', ' ') : '');

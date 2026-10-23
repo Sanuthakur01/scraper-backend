@@ -7,7 +7,7 @@
 //   - Each job's course, experience group and (non-filtered) reason are brought up to date.
 // dryRun: count what would change, change nothing.
 import { classifyTitle } from './classify.js';
-import { leftOutReason } from './config/filters.js';
+import { leftOutReason, nonFilteredReason } from './config/filters.js';
 import { Job, NonFilteredJob } from './models.js';
 import { experienceBand } from './normalize.js';
 
@@ -49,7 +49,8 @@ export async function reclassifyJobs({ dryRun = false } = {}) {
         set.experienceBand = band;
         counts.bandChanged++;
       }
-      const reason = leftOutReason(job);
+      // A non-filtered job an extra search found stays non-filtered ('extra-search') when it passes the rules.
+      const reason = isKept ? leftOutReason(job) : nonFilteredReason(job);
       const label = `"${job.title}" at ${job.company || 'company not shown'}`;
       if (isKept && reason) {
         counts.toNonFiltered[reason]++;
@@ -58,7 +59,7 @@ export async function reclassifyJobs({ dryRun = false } = {}) {
       } else if (!isKept && !reason) {
         counts.toKept++;
         if (examples.toKept.length < 4) examples.toKept.push(label);
-        const { leftOutBy: _gone, ...doc } = job;
+        const { leftOutBy: _gone, fromExtraSearch: _extra, ...doc } = job;
         moves.push({ doc: { ...doc, ...set }, from: NonFilteredJob, to: Job });
       } else {
         counts[isKept ? 'kept' : 'nonFiltered']++;

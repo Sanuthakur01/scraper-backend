@@ -50,6 +50,9 @@ const jobSchema = new mongoose.Schema(
     // NonFilteredJob only: why the keep rules leave it out: 'big-company' | 'experience' (under the
     // minimum) | 'no-experience' (not stated, and not the same job as a kept one). See leftOutReason.
     leftOutBy: String,
+    // NonFilteredJob only: one of a course's extra searches (extraSearchTerms) found it, and no main search
+    // kept it (else it would be a kept job). Such a job that passes the keep rules has leftOutBy 'extra-search'.
+    fromExtraSearch: Boolean,
   },
   { versionKey: false, minimize: false },
 );
@@ -79,6 +82,7 @@ const searchSchema = new mongoose.Schema(
     platform: String,
     course: String,
     term: String,
+    extra: Boolean, // one of the course's extraSearchTerms
     location: String, // only for platforms searched city by city
     status: String, // ok | error
     items: Number,
@@ -105,6 +109,7 @@ const platformSchema = new mongoose.Schema(
     noExperience: Number, // didn't state experience...
     noExperienceKept: Number, // ...but matched a 2-5 year job on another platform, so added to it
     kept: Number,
+    extraSearch: Number, // matched a course in an extra search: non-filtered unless a main search also found it
     newJobs: Number,
     knownJobs: Number,
     rawFile: String, // raw results on disk; `npm run replay` can load them again
@@ -136,6 +141,7 @@ const collectorRunSchema = new mongoose.Schema(
       outsideExperience: Number,
       noExperience: Number,
       noExperienceKept: Number,
+      extraSearch: Number, // matched a course in an extra search (non-filtered unless a main search found it too)
       unique: Number,
       inserted: Number,
       updated: Number,

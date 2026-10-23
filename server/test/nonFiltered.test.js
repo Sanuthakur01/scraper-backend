@@ -151,3 +151,93 @@ test('reclassify moves jobs between the two sets when the rules change, losing n
   assert.ok(back && back.leftOutBy === undefined, 'moved to the kept jobs without a reason');
   assert.deepEqual((await NonFilteredJob.find().lean()).map((j) => j.company).sort(), ['Firm 4', 'Infosys']);
 });
+
+// Naukri (and Indeed, when given) answer each search, by keyword, with these items; every other search is empty.
+const runSearches = (byKeyword, now, indeedByKeyword = {}) =>
+  collect({
+    fetchSearches: (source, inputs) =>
+      source.via === 'apify'
+        ? perSearch(async () => ({ items: [] }), 3, { retryDelayMs: 0 })(source, inputs)
+        : Promise.resolve(
+            inputs.map((i) => ({ status: 'ok', items: ({ Naukri: byKeyword, Indeed: indeedByKeyword }[source.platform] ?? {})[i.keyword] ?? [] })),
+          ),
+    now,
+    log: () => {},
+    rawDir: null,
+  });
+
+test('what the extra searches find is non-filtered (even when it passes the keep rules); a main search still wins', async () => {
+  const done = await runSearches(
+    {
+      'data analyst': [naukri('K1', 'Data Analyst', 'Kappa')],
+      'business analyst': [
+        naukri('B1', 'Business Analyst', 'Lambda'), // passes the keep rules, but only this search found it
+        naukri('K1', 'Data Analyst', 'Kappa'), // the same listing the main search found: stays kept, once
+        naukri('B3', 'Business Analyst', 'Mu', 0, 2), // under 2 years: that reason comes first
+        naukri('B4', 'Sales Manager', 'Rho'), // fits no course: not stored anywhere
+      ],
+      'mis executive': [naukri('M1', 'MIS Executive', 'Xi')],
+      'site reliability engineer': [naukri('S1', 'Site Reliability Engineer', 'Nu')],
+    },
+    new Date('2026-10-16T01:00:00Z'),
+  );
+
+  assert.deepEqual(await companies(Job), ['Kappa'], 'the main numbers come from the main searches only');
+  const left = await NonFilteredJob.find().lean();
+  assert.deepEqual(
+    left.map((j) => `${j.company} ${j.course} ${j.leftOutBy} ${j.fromExtraSearch}`).sort(),
+    [
+      'Lambda data-analyst extra-search true',
+      'Mu data-analyst experience true',
+      'Nu production-support extra-search true',
+      'Xi data-analyst extra-search true',
+    ],
+  );
+  assert.equal(done.totals.extraSearch, 5, 'matched a course in an extra search');
+  assert.equal(done.totals.nonFiltered.alreadyKept, 1);
+  const run = await CollectorRun.findOne().lean();
+  assert.deepEqual(run.searches.filter((s) => s.extra && s.platform === 'Naukri').map((s) => s.term), ['mis executive', 'business analyst', 'site reliability engineer']);
+
+  // Next day a main search finds Lambda's job too: it becomes a kept job, and leaves non-filtered.
+  await NonFilteredJob.updateOne({ company: 'Lambda' }, { $set: { manual: { remarks: 'Called HR', updatedAt: new Date() } } });
+  await runSearches({ 'data analyst': [naukri('B1', 'Business Analyst', 'Lambda')] }, new Date('2026-10-17T01:00:00Z'));
+  assert.deepEqual(await companies(Job), ['Kappa', 'Lambda']);
+  assert.equal((await Job.findOne({ company: 'Lambda' }).lean()).manual.remarks, 'Called HR', 'its HR details moved with it');
+  assert.deepEqual(await companies(NonFilteredJob), ['Mu', 'Nu', 'Xi']);
+
+  // A main search's left-out listing (0-1 years) joins Nu's job, which says 3-6: still not kept by a main
+  // search, so it keeps its reason (never none).
+  await runSearches({ 'production support': [naukri('S1', 'Site Reliability Engineer', 'Nu', 0, 1)] }, new Date('2026-10-18T01:00:00Z'));
+  const nu = await NonFilteredJob.findOne({ company: 'Nu' }).lean();
+  assert.deepEqual([nu.fromExtraSearch, nu.leftOutBy], [true, 'extra-search']);
+  assert.ok((await NonFilteredJob.find().lean()).every((j) => j.leftOutBy), 'every non-filtered job has a reason');
+});
+
+test('a main search listing without stated experience and an extra search listing with it: one non-filtered job, with a reason', async () => {
+  await runSearches(
+    { 'business analyst': [naukri('O9', 'Business Analyst', 'Omega')] },
+    new Date('2026-10-16T01:00:00Z'),
+    { 'data analyst': [indeed('i9', 'Business Analyst', 'Omega')] }, // no experience stated, no kept twin
+  );
+  assert.equal(await Job.countDocuments(), 0);
+  const left = await NonFilteredJob.find().lean();
+  assert.deepEqual(left.map((j) => `${j.company} ${[...j.platforms].sort().join('+')} ${j.leftOutBy}`), ['Omega Indeed+Naukri extra-search']);
+});
+
+test('reclassify keeps a job only the extra searches found as non-filtered', async () => {
+  const { reclassifyJobs } = await import('../src/reclassify.js');
+  const now = new Date();
+  const doc = (n, extra) => ({
+    fingerprint: `x${n}`, title: 'Business Analyst', company: `Firm ${n}`, course: 'data-analyst', cities: ['Pune'], experienceMin: 3,
+    experienceBand: '3', firstSeenAt: now, lastSeenAt: now, primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: [`X:${n}`], ...extra,
+  });
+  await NonFilteredJob.create([
+    doc(1, { leftOutBy: 'extra-search', fromExtraSearch: true }), // stays
+    doc(2, { leftOutBy: 'experience', fromExtraSearch: false }), // passes the rules now, and a main search found it: kept
+  ]);
+  const { counts } = await reclassifyJobs();
+  assert.equal(counts.toKept, 1);
+  assert.deepEqual((await NonFilteredJob.find().lean()).map((j) => `${j.company} ${j.leftOutBy}`), ['Firm 1 extra-search']);
+  const moved = await Job.findOne({ company: 'Firm 2' }).lean();
+  assert.ok(moved && moved.leftOutBy === undefined && moved.fromExtraSearch === undefined, 'a kept job has neither');
+});

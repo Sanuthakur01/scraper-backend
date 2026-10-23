@@ -1,6 +1,10 @@
 // Which jobs count for each course. A job's course is decided from its title only.
 //
 // searchTerms: what we search for on every platform (each term = one Apify run per platform).
+// extraSearchTerms: searched every day too, to find more of a course's jobs; but what these find is a
+//              non-filtered job (leftOutBy 'extra-search' when it passes the keep rules), so the dashboard's
+//              main (Filtered) numbers come from searchTerms alone. A job a searchTerms search keeps is a
+//              kept job as usual.
 // strong:      phrases that clearly name the role. The longest matching phrase wins across courses,
 //              so "data analytics engineer" goes to Data Engineering ("analytics engineer" is longer).
 // weak:        used only when no course has a strong match.
@@ -17,12 +21,15 @@ export const COURSES = [
     id: 'data-analyst',
     name: 'Data Analyst',
     searchTerms: ['data analyst', 'power bi developer', 'mis analyst'],
+    extraSearchTerms: ['mis executive', 'business analyst'],
     strong: [
       'data analyst', 'data analytics', 'mis analyst', 'mis executive', 'bi analyst', 'bi developer',
       'business intelligence', 'reporting analyst', 'power bi', 'powerbi', 'tableau developer',
       'analytics analyst', 'product analyst', 'insights analyst', 'sql analyst', 'business data analyst',
     ],
-    weak: ['tableau', 'mis', 'analytics', 'reporting', 'dashboard'],
+    // "business analyst" only when no course has a strong match: "Business Analyst - Production Support"
+    // stays Production Support.
+    weak: ['tableau', 'mis', 'analytics', 'reporting', 'dashboard', 'business analyst'],
     exclude: [],
     teaches: ['SQL', 'Python', 'Excel', 'Power BI', 'Tableau', 'Data Visualization', 'Statistics', 'Pandas'],
   },
@@ -68,6 +75,7 @@ export const COURSES = [
     id: 'production-support',
     name: 'Production Support',
     searchTerms: ['production support', 'application support'],
+    extraSearchTerms: ['site reliability engineer'],
     strong: [
       'production support', 'application support', 'prod support', 'l1 support', 'l2 support',
       'l3 support', 'l2 l3 support', 'support analyst', 'application operations', 'it operations',
@@ -83,6 +91,12 @@ export const COURSES = [
       'Autosys', 'PL/SQL',
     ],
   },
+];
+
+// Every search a course runs: its searchTerms, then its extraSearchTerms (extra: true).
+export const searchesOf = (course) => [
+  ...course.searchTerms.map((term) => ({ term, extra: false })),
+  ...(course.extraSearchTerms ?? []).map((term) => ({ term, extra: true })),
 ];
 
 // Titles containing these never count for any course.

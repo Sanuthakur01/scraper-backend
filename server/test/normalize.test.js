@@ -25,6 +25,10 @@ test('titles go to the right course', () => {
     'Data Analytics Engineer': 'data-engineering',
     'L2/L3 Application Support Engineer - Unix, SQL': 'production-support',
     'Site Reliability Engineer (SRE)': 'production-support',
+    'Business Analyst': 'data-analyst',
+    'Senior Business Analyst - Insurance': 'data-analyst',
+    'Business Analyst - Production Support': 'production-support', // a strong match elsewhere wins
+    'Business Analyst (Azure Data Factory)': 'data-engineering',
   };
   for (const [title, course] of Object.entries(cases)) assert.equal(classifyTitle(title), course, title);
 });

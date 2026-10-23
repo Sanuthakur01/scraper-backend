@@ -19,8 +19,8 @@ import os from 'node:os';
 import path from 'node:path';
 import mongoose from 'mongoose';
 import { config } from '../config.js';
-import { COURSES } from '../config/courses.js';
-import { experienceRangeText, leftOutReason } from '../config/filters.js';
+import { COURSES, searchesOf } from '../config/courses.js';
+import { experienceRangeText, nonFilteredReason } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
 import { CollectorRun, Job, NonFilteredJob } from '../models.js';
 import { buildJob } from './buildJob.js';
@@ -84,6 +84,7 @@ async function searchPlatform(source, tasks, fetchSearches, log) {
       platform: source.platform,
       course: task.course.id,
       term: task.term,
+      extra: task.extra, // one of the course's extraSearchTerms
       location: task.location,
       status: result.status,
       items: result.items ?? [],
@@ -196,7 +197,7 @@ function saveRawFile(rawDir, source, now, searches, log) {
       platform: source.platform,
       via: source.via,
       startedAt: now,
-      searches: searches.map(({ term, location, course, status, error, note, items }) => ({ term, location, course, status, error, note, items })),
+      searches: searches.map(({ term, extra, location, course, status, error, note, items }) => ({ term, extra, location, course, status, error, note, items })),
     };
     fs.writeFileSync(file, JSON.stringify(raw));
     for (const name of fs.readdirSync(rawDir)) {
@@ -309,9 +310,10 @@ async function loadOpeningsForListings(pool, listings, model = Job) {
 // and saves them. Platforms are saved one at a time (callers chain this), because they share the pool.
 // summary.queued = true once the jobs are in the pool: from then on a later save can still write them.
 // Jobs that don't state their experience go to `waiting` (see attachWaitingListings); jobs that fit a
-// course but are left out by the keep rules go to `leftOut` (see saveNonFiltered).
+// course but are left out by the keep rules go to `leftOut` (see saveNonFiltered), and so does every job
+// an extra search finds (fromExtraSearch): a main search's kept job wins over it there.
 async function savePlatform(searches, pool, now, log, summary, waiting, leftOut) {
-  const counts = { fetched: 0, inIndia: 0, matched: 0, bigCompany: 0, outsideExperience: 0, noExperience: 0, kept: 0 };
+  const counts = { fetched: 0, inIndia: 0, matched: 0, bigCompany: 0, outsideExperience: 0, noExperience: 0, kept: 0, extraSearch: 0 };
   const listings = [];
   for (const search of searches) {
     for (const item of search.items) {
@@ -327,7 +329,10 @@ async function savePlatform(searches, pool, now, log, summary, waiting, leftOut)
       counts.inIndia++;
       if (result.skip === 'no-course') continue;
       counts.matched++;
-      if (result.skip === 'big-company' || result.skip === 'experience') {
+      if (search.extra) {
+        counts.extraSearch++;
+        leftOut.push({ ...listingFromJob(result.job), fromExtraSearch: true });
+      } else if (result.skip === 'big-company' || result.skip === 'experience') {
         counts[result.skip === 'big-company' ? 'bigCompany' : 'outsideExperience']++;
         leftOut.push(listingFromJob(result.job));
       } else if (result.job.experienceUnknown) {
@@ -392,7 +397,8 @@ function resolveEarlierFailures(summaries, log) {
 // ---------- Non-filtered jobs ----------
 
 // Saves the listings the keep rules left out (a big company, under the minimum experience, experience
-// not stated) as non-filtered jobs (NonFilteredJob), for the dashboard's Non-filtered switch. It runs
+// not stated), and the jobs only an extra search found (extra-search), as non-filtered jobs (NonFilteredJob),
+// for the dashboard's Non-filtered switch. It runs
 // after the kept jobs are saved, so every kept job of this run is known, and never changes them.
 // Left-out listings are merged among themselves the same way as kept ones, and a listing is never in
 // both sets:
@@ -428,7 +434,7 @@ async function saveNonFiltered(leftOut, pool, now, log) {
     }
   }
 
-  await writeTouched(others, now, log, NonFilteredJob, (o) => ({ leftOutBy: leftOutReason(o) }));
+  await writeTouched(others, now, log, NonFilteredJob, (o) => ({ leftOutBy: nonFilteredReason(o), fromExtraSearch: Boolean(o.fromExtraSearch) }));
   if (moveManual.length) await Job.bulkWrite(moveManual, { ordered: false });
   if (removeIds.length) await NonFilteredJob.deleteMany({ _id: { $in: removeIds } });
 
@@ -478,10 +484,11 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
     const skipIds = lookbackDays > 1 ? await storedListingIds('LinkedIn') : [];
     const tasksBySource = sources.map((source) =>
       COURSES.flatMap((course) =>
-        course.searchTerms.flatMap((term) =>
+        searchesOf(course).flatMap(({ term, extra }) =>
           (source.locations ?? [null]).map((location) => ({
             course,
             term,
+            extra,
             location,
             input: source.buildInput(term, limitFor(source), location, {
               days: lookbackDays,
@@ -513,7 +520,8 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
             Object.assign(summary, await savePlatform(searches, pool, now, log, summary, waiting, leftOut), { savedAt: new Date() });
             log(
               `  ✓ ${source.platform}: saved (${summary.newJobs} new, ${summary.knownJobs} already known; ` +
-                `left out: ${summary.bigCompany} big company, ${summary.outsideExperience} outside ${experienceRangeText()} yrs)`,
+                `left out: ${summary.bigCompany} big company, ${summary.outsideExperience} outside ${experienceRangeText()} yrs; ` +
+                `${summary.extraSearch} from the extra searches)`,
             );
             resolveEarlierFailures(summaries, log);
           } catch (err) {
@@ -575,6 +583,7 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
       outsideExperience: sum('outsideExperience'),
       noExperience: sum('noExperience'),
       noExperienceKept: sum('noExperienceKept'),
+      extraSearch: sum('extraSearch'),
       unique: pool.openings.filter((o) => o.seenThisRun).length,
       inserted: pool.openings.filter((o) => o.createdThisRun && !o.isNew).length,
       updated: pool.openings.filter((o) => o.seenThisRun && !o.createdThisRun).length,

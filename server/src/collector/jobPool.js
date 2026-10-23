@@ -77,6 +77,7 @@ export const openingFromDoc = (doc) => ({
 export function mergeListing(opening, listing) {
   opening.touched = true;
   opening.seenThisRun = true;
+  if (listing.fromExtraSearch) opening.fromExtraSearch = true; // only ever in the non-filtered jobs' pool
   for (const platform of listing.platforms) {
     if (!opening.platforms.includes(platform)) opening.platforms.push(platform);
     if (listing.links?.[platform]) opening.links[platform] = listing.links[platform];

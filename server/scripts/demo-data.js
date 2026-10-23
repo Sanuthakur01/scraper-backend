@@ -1,6 +1,6 @@
 // Fake actor output for the demo, shaped like each real Apify actor's items so it runs through
 // the real cleaning, course-matching and duplicate-merging code. Company names are clearly fake.
-import { COURSES } from '../src/config/courses.js';
+import { COURSES, searchesOf } from '../src/config/courses.js';
 
 const TITLES = {
   'data-analyst': ['Data Analyst', 'Senior Data Analyst', 'MIS Analyst', 'Power BI Developer', 'Business Intelligence Analyst', 'Reporting Analyst - SQL', 'Data Analyst (Excel, SQL)'],
@@ -46,7 +46,7 @@ export function createDemoFetcher(now, dayIndex) {
   return async function fetchOne(source, input) {
     const { platform } = source;
     const term = input.keywords ?? input.title ?? input.keyword;
-    const course = COURSES.find((c) => c.searchTerms.includes(term));
+    const course = COURSES.find((c) => searchesOf(c).some((s) => s.term === term));
     const rand = seededRandom(hash(`${platform}|${term}|${dayIndex}`));
     const pick = (list) => list[Math.floor(rand() * list.length)];
     const pickCity = () => {

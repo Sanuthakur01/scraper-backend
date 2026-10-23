@@ -71,13 +71,17 @@ test('Apify is used only for LinkedIn; Naukri, Indeed and Glassdoor each go to t
     ...quiet,
   });
   assert.deepEqual([...new Set(apifyCalls)], ['LinkedIn']);
-  assert.equal(apifyCalls.length, 9);
+  assert.equal(apifyCalls.length, 12, '9 main searches and 3 extra ones');
   assert.deepEqual(scraperCalls.sort(), [
-    ['Glassdoor', 'glassdoor_feed.py', 9],
-    ['Indeed', 'indeed_feed.py', 9],
-    ['Naukri', 'naukri_feed.py', 9],
+    ['Glassdoor', 'glassdoor_feed.py', 12],
+    ['Indeed', 'indeed_feed.py', 12],
+    ['Naukri', 'naukri_feed.py', 12],
   ]);
-  assert.equal(run.searches.length, 36);
+  assert.equal(run.searches.length, 48);
+  assert.deepEqual(
+    run.searches.filter((s) => s.extra && s.platform === 'Naukri').map((s) => `${s.course}: ${s.term}`),
+    ['data-analyst: mis executive', 'data-analyst: business analyst', 'production-support: site reliability engineer'],
+  );
   assert.equal(run.platforms.length, 4);
 });
 
@@ -110,7 +114,7 @@ test('if the Naukri scraper fails completely, the other platforms are still save
     ...quiet,
   });
   assert.equal(run.status, 'partial');
-  assert.equal(run.searches.filter((s) => s.platform === 'Naukri' && s.status === 'error').length, 9);
+  assert.equal(run.searches.filter((s) => s.platform === 'Naukri' && s.status === 'error').length, 12);
   assert.equal(run.totals.updated, 1, 'the LinkedIn listing updated the known job');
   const job = await Job.findOne().lean();
   assert.equal(job.firstSeenAt.toISOString(), '2026-10-16T01:30:00.000Z');
