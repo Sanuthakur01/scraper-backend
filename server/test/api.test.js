@@ -1088,3 +1088,54 @@ test('search box: companies however spelled, HR names, emails and phone numbers 
     await NonFilteredJob.deleteMany({ fingerprint: /^srch/ });
   }
 });
+
+test('SRE Openings: SRE jobs of the period in the view\'s set (Filtered or Non-filtered), newest first, with both counts', async () => {
+  const now = Date.now();
+  const job = (n, title, hoursAgo, extra = {}) => ({
+    fingerprint: `sre${n}`, title, company: `Reliable Co ${n}`, course: 'production-support', cities: ['Pune'],
+    firstSeenAt: new Date(now - hoursAgo * HOUR), lastSeenAt: new Date(now - hoursAgo * HOUR), primaryPlatform: 'LinkedIn',
+    platforms: ['LinkedIn'], sourceKeys: [`SRE:${n}`], links: { LinkedIn: `https://example.com/sre${n}` }, experienceMin: 3, ...extra,
+  });
+  await Job.create([
+    job(1, 'Site Reliability Engineer', 1),
+    job(2, 'Senior SRE - Kubernetes', 3),
+    job(3, 'Systems Reliability Engineer II', 5),
+    job(4, 'Quality & Reliability Engineer', 2), // hardware quality: not SRE
+    job(5, 'Production Support Engineer', 2), // not SRE
+    job(6, 'Site Reliability Lead', 24 * 20), // too old for the last day / 7 days
+  ]);
+  await NonFilteredJob.create([
+    job(7, 'Site Reliability Engineer (SRE)', 4, { leftOutBy: 'extra-search', fromExtraSearch: true }),
+    job(8, 'SRE Associate', 6, { leftOutBy: 'experience', experienceMin: 0 }),
+  ]);
+  const get = async (q, token = '') => {
+    const res = await fetch(`${base}/role-jobs?${q}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    return { status: res.status, body: await res.json() };
+  };
+  try {
+    let { body } = await get('role=sre&days=7');
+    assert.equal(body.role.name, 'SRE Openings');
+    assert.equal(body.view, 'filtered');
+    assert.deepEqual(body.items.map((j) => j.title), ['Site Reliability Engineer', 'Senior SRE - Kubernetes', 'Systems Reliability Engineer II']);
+    assert.deepEqual([body.total, body.filtered, body.nonFiltered], [3, 3, 2], 'the view\'s count, and both sets\'');
+    assert.ok(body.items.every((j) => j.leftOutBy === undefined));
+    assert.ok(body.items[0].contact && body.items[0].links, 'jobs as the job list sends them');
+
+    ({ body } = await get('role=sre&days=7&view=nonfiltered'));
+    assert.equal(body.view, 'nonfiltered');
+    assert.deepEqual(body.items.map((j) => `${j.title}: ${j.leftOutBy}`), ['Site Reliability Engineer (SRE): extra-search', 'SRE Associate: experience']);
+    assert.deepEqual([body.total, body.filtered, body.nonFiltered], [2, 3, 2]);
+
+    ({ body } = await get('role=sre&days=30'));
+    assert.equal(body.total, 4, 'the 20-day-old one is in the last 30 days');
+    ({ body } = await get('role=sre&days=7&limit=2&page=2'));
+    assert.deepEqual([body.items.map((j) => j.title), body.pages], [['Systems Reliability Engineer II'], 2]);
+
+    assert.equal((await get('role=nope&days=7')).status, 400);
+    assert.equal((await get('role=sre&days=7', 'expired')).status, 401);
+    assert.equal((await get('role=sre&days=7', 'STUDENT:x@example.com')).status, 403);
+  } finally {
+    await Job.deleteMany({ fingerprint: /^sre/ });
+    await NonFilteredJob.deleteMany({ fingerprint: /^sre/ });
+  }
+});

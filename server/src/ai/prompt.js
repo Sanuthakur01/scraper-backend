@@ -18,7 +18,9 @@ export function describePage(context = {}) {
         ? 'the Activity record'
         : path.startsWith('/partners')
           ? 'Hiring partners'
-          : 'the Dashboard (all courses)';
+          : path.startsWith('/sre')
+            ? 'the SRE Openings page (Site Reliability Engineer openings)'
+            : 'the Dashboard (all courses)';
   const p = context.period ?? {};
   const period = p.from ? (p.from === p.to ? `the day ${p.from}` : `${p.from} to ${p.to}`) : p.days === 1 ? 'the latest day' : p.days ? `the last ${p.days} days` : '';
   const view = context.view === 'nonfiltered' ? 'Non-filtered' : 'Filtered';

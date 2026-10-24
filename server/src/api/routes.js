@@ -13,6 +13,7 @@ import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
 import { MAX_STUDENTS, PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
 import { searchEverything } from './search.js';
+import { ROLE_BOXES, roleTitleQuery } from '../config/roleBoxes.js';
 
 const router = express.Router();
 
@@ -554,6 +555,42 @@ router.get('/partners.csv', wrap(async (req, res) => {
   res.set('Content-Type', 'text/csv; charset=utf-8');
   res.set('Content-Disposition', `attachment; filename="hiring-partners-${list.to}.csv"`);
   res.send(`﻿${[header.join(','), ...lines].join('\r\n')}`);
+}));
+
+// ---------- One role's openings (the dashboard's "SRE Openings" box) ----------
+
+// The openings of one role (config/roleBoxes.js) found in the period, in the view's set (Filtered, or with
+// ?view=nonfiltered the Non-filtered jobs, each with its leftOutBy), newest first. ?role=sre, ?days= or
+// ?from=&to=, ?page=, ?limit= (at most 100). Also how many each set has. Signed in only.
+router.get('/role-jobs', requirePermission('view'), wrap(async (req, res) => {
+  const role = ROLE_BOXES.find((r) => r.id === req.query.role);
+  if (!role) return res.status(400).json({ error: `role must be one of: ${ROLE_BOXES.map((r) => r.id).join(', ')}.` });
+  const range = await periodRange(req.query, 1);
+  const match = { firstSeenAt: { $gte: range.start, $lt: range.end }, ...roleTitleQuery(role) };
+  const pageSize = Math.min(clampDays(req.query.limit, 25, 100), 100);
+  const page = clampDays(req.query.page, 1, 100_000);
+  const J = jobsFor(req);
+  const [items, filtered, nonFiltered] = await Promise.all([
+    J.find(match, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
+    Job.countDocuments(match),
+    NonFilteredJob.countDocuments(match),
+  ]);
+  const view = J === NonFilteredJob ? 'nonfiltered' : 'filtered';
+  const total = view === 'nonfiltered' ? nonFiltered : filtered;
+  res.json({
+    role: { id: role.id, name: role.name },
+    view,
+    days: range.days,
+    from: range.from,
+    to: range.to,
+    total,
+    filtered,
+    nonFiltered,
+    page,
+    pageSize,
+    pages: Math.max(1, Math.ceil(total / pageSize)),
+    items: items.map(jobRow),
+  });
 }));
 
 // ---------- One company's openings, and the search box ----------
