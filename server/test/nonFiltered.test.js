@@ -25,14 +25,19 @@ const naukri = (id, title, company, min = 3, max = 6) => ({
   jobId: id, jdURL: `/job-listings-${id}`, title, companyName: company, minimumExperience: String(min), maximumExperience: String(max),
   placeholders: [{ type: 'location', label: 'Pune' }],
 });
-const indeed = (key, title, company, snippet = '') => ({ jobkey: key, displayTitle: title, company, formattedLocation: 'Pune, Maharashtra', snippet });
+// Indeed in the Apify actor's format (valig/indeed-jobs-scraper), in Pune.
+const indeed = (key, title, company, text = '') => ({
+  key, title, employer: { name: company }, location: { countryCode: 'IN', admin1Code: 'MH', admin3Code: 'PNQ', city: '' }, description: { text },
+});
+// What a search was for, whichever platform's input it is.
+const termOf = (input) => input.keywords ?? input.title ?? input.keyword;
 
 // Naukri and Indeed answer the "data engineer" search with these items; every other search is empty.
 const run = (items, now) =>
   collect({
     fetchSearches: (source, inputs) =>
       source.via === 'apify'
-        ? perSearch(async () => ({ items: [] }), 3, { retryDelayMs: 0 })(source, inputs)
+        ? perSearch(async (src, input) => ({ items: termOf(input) === 'data engineer' ? (items[src.platform] ?? []) : [] }), 3, { retryDelayMs: 0 })(source, inputs)
         : Promise.resolve(inputs.map((i) => ({ status: 'ok', items: i.keyword === 'data engineer' ? (items[source.platform] ?? []) : [] }))),
     now,
     log: () => {},
@@ -81,7 +86,7 @@ test('a left-out listing that is the same job as a kept one is not added, and th
   const done = await run(
     {
       Naukri: [naukri('N1', 'Data Engineer', 'Alpha')],
-      Indeed: [indeed('i1', 'Data Engineer', 'Alpha', '<li>1+ years of experience</li>')], // under 2 years on Indeed
+      Indeed: [indeed('i1', 'Data Engineer', 'Alpha', 'Freshers welcome, 0-1 years of experience')], // a fresher job on Indeed
     },
     new Date('2026-10-16T01:00:00Z'),
   );
@@ -157,10 +162,8 @@ const runSearches = (byKeyword, now, indeedByKeyword = {}) =>
   collect({
     fetchSearches: (source, inputs) =>
       source.via === 'apify'
-        ? perSearch(async () => ({ items: [] }), 3, { retryDelayMs: 0 })(source, inputs)
-        : Promise.resolve(
-            inputs.map((i) => ({ status: 'ok', items: ({ Naukri: byKeyword, Indeed: indeedByKeyword }[source.platform] ?? {})[i.keyword] ?? [] })),
-          ),
+        ? perSearch(async (src, input) => ({ items: (src.platform === 'Indeed' ? indeedByKeyword : {})[termOf(input)] ?? [] }), 3, { retryDelayMs: 0 })(source, inputs)
+        : Promise.resolve(inputs.map((i) => ({ status: 'ok', items: (source.platform === 'Naukri' ? byKeyword : {})[i.keyword] ?? [] }))),
     now,
     log: () => {},
     rawDir: null,

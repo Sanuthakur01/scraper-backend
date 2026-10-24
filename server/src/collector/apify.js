@@ -6,9 +6,13 @@ const UNFINISHED = new Set(['READY', 'RUNNING', 'TIMING-OUT', 'ABORTING']);
 const OUT_OF_CREDIT = /monthly usage|usage hard limit|exceed(?:s|ed)? (?:your|the) (?:monthly|plan)|not enough (?:credit|usage)|insufficient (?:credit|funds)/i;
 
 // What one LinkedIn result and one actor start cost on Apify's free plan (valig/linkedin-jobs-scraper's
-// "FREE" tier; paid plans are cheaper), for estimating a run before it starts.
+// "FREE" tier; paid plans are cheaper), for estimating a run before it starts. A source can say its own
+// price per result (pricePerResult in config/sources.js).
 const PRICE_PER_RESULT = 0.0004;
 const PRICE_PER_START = 0.001;
+
+// The most some searches can cost: their results (all of them together) at pricePerResult, plus a start each.
+export const apifyCost = ({ searches, results, pricePerResult = PRICE_PER_RESULT }) => results * pricePerResult + searches * PRICE_PER_START;
 
 // Runs one actor, waits for it to finish and returns its dataset items.
 // A run still going after waitSecs is waited for (up to maxWaitMins in all) rather than treated as failed,
@@ -42,10 +46,15 @@ export function createApifyFetcher(token, { waitSecs = 900, maxWaitMins = 30, cl
 }
 
 // Before a collection: is there enough Apify credit left this month for its LinkedIn searches?
+// results: the most the searches may return in all (searches x limitPerSearch when every search reads the same);
+// or needed: the run's cost, worked out already (apifyCost per platform, added up).
 // Returns { ok, left, needed, resetsAt }. If Apify can't be asked, ok is true (the searches then report
 // any problem themselves).
-export async function checkApifyCredit(token, { searches, limitPerSearch }, { client = new ApifyClient({ token }) } = {}) {
-  const needed = searches * (limitPerSearch * PRICE_PER_RESULT + PRICE_PER_START);
+export async function checkApifyCredit(
+  token,
+  { searches, limitPerSearch, results = searches * limitPerSearch, needed = apifyCost({ searches, results }) },
+  { client = new ApifyClient({ token }) } = {},
+) {
   try {
     const info = await client.user('me').limits();
     const max = info?.limits?.maxMonthlyUsageUsd;

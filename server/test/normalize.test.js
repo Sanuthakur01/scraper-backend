@@ -29,8 +29,46 @@ test('titles go to the right course', () => {
     'Senior Business Analyst - Insurance': 'data-analyst',
     'Business Analyst - Production Support': 'production-support', // a strong match elsewhere wins
     'Business Analyst (Azure Data Factory)': 'data-engineering',
+    'SAP Support Consultant': 'production-support',
+    'Production Control Analyst': 'production-support',
+    'Service Desk Engineer': 'production-support',
+    'Technical Operations Engineer': 'production-support',
+    'Middleware Support Engineer (Kafka)': 'production-support', // not Data Engineering
+    // Support titles the searches found that used to match nothing (23 Oct 2026)
+    'Senior Engineer, Site Reliability Engineering': 'production-support',
+    'Site Reliability Lead': 'production-support',
+    'Service Reliability Engineer- Apple Data Platforms': 'production-support',
+    'Reliability Engineer II': 'production-support',
+    'Analyst Senior, Application Maintenance & Support': 'production-support',
+    'IT Applications Support': 'production-support',
+    'Senior SQL Support': 'production-support',
+    'ERP Second Level Support (RUN) - Analyst': 'production-support',
+    'Siebel Support _ Tier 2 FTE': 'production-support',
+    'Sr. Service Operations Engineer': 'production-support',
+    'ServiceNow Business Analyst': 'production-support', // the ServiceNow role, not a Data Analyst one
+    'Data Analyst - ServiceNow Reporting': 'data-analyst', // a longer strong phrase still wins
   };
   for (const [title, course] of Object.entries(cases)) assert.equal(classifyTitle(title), course, title);
+});
+
+test("every search term is a title its own course's rules recognise (else its jobs would be thrown away)", async () => {
+  const { COURSES, searchesOf } = await import('../src/config/courses.js');
+  for (const course of COURSES) {
+    for (const { term, extra } of searchesOf(course)) {
+      if (extra) continue; // extra searches look for other titles on purpose (e.g. "mis executive" finds Data Analyst jobs)
+      const title = term.replace(/\b\w/g, (c) => c.toUpperCase());
+      assert.equal(classifyTitle(`Senior ${title}`), course.id, `${course.name}: "${term}"`);
+    }
+  }
+});
+
+test("LinkedIn's searches are some of each course's own searches (a typo would quietly search nothing)", async () => {
+  const { COURSES, searchesOf } = await import('../src/config/courses.js');
+  for (const course of COURSES) {
+    const all = searchesOf(course).map((s) => s.term);
+    assert.ok(course.linkedinSearchTerms?.length, `${course.name} has LinkedIn searches`);
+    for (const term of course.linkedinSearchTerms) assert.ok(all.includes(term), `${course.name}: "${term}" is one of its searches`);
+  }
 });
 
 test('unrelated titles are rejected', () => {
@@ -167,4 +205,16 @@ test('skills with short or everyday names are found only where they mean the ski
   assert.deepEqual(extractSkills('Our R&D team will help you excel at this'), [], '"R&D" and "excel at" are not skills');
   assert.deepEqual(extractSkills('Build RAG pipelines; share RAG status in incident management'), ['RAG', 'Incident management']);
   assert.deepEqual(extractSkills('Data warehousing, PySpark, Excel macros'), ['Excel', 'Excel VBA/Macros', 'Spark', 'Data Warehousing']);
+});
+
+test("Production Support skills are found in postings, and not in other courses' everyday words", () => {
+  const post = 'L2 support in 24/7 rotational shifts: incident and problem management, RCA, hotfixes, batch job monitoring with Control-M, ' +
+    'meeting SLAs, maintaining runbooks, on-call support and hypercare after go-live.';
+  const found = extractSkills(post);
+  for (const skill of ['Problem management', 'Root cause analysis', 'Hotfix deployment', 'SLA management', '24x7 support', 'Rotational shifts',
+    'Batch monitoring', 'Runbooks and SOPs', 'On-call support', 'Hypercare', 'Control-M']) {
+    assert.ok(found.includes(skill), skill);
+  }
+  assert.ok(!extractSkills('Build a RAG pipeline over our knowledge base with LangChain').includes('Runbooks and SOPs'), 'a knowledge base is not a runbook');
+  assert.deepEqual(extractSkills('Strong troubleshooting and debugging skills; automation a plus'), [], 'everyday words are not skills');
 });

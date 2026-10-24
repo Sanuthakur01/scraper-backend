@@ -92,11 +92,17 @@ const RATE_LIMITED = /ratelimited|http 429|too many requests|http 403/i;
 // Chrome refuses to open a profile another Chrome window is using (e.g. a `--login` window left open).
 const PROFILE_IN_USE = /ProcessSingleton|user data directory is already in use|profile (?:directory )?is (?:already )?in use/i;
 
-// fetchSearches(source, inputs) for the collector: runs source.feedScript for all inputs (one Python
-// process), retries the failed ones once, and returns one result per input. After a rate-limit error
-// the retry waits rateLimitDelayMs instead of retryDelayMs.
+// How long one run of a platform's scraper may take, in minutes, for this many searches. scale: how many
+// times the usual number of results each search reads (minutesPerSearch is for the usual number).
+export const scraperTimeoutMinutes = (source, timeoutMinutes, searches, scale = 1) =>
+  Math.max(timeoutMinutes, source.minTimeoutMinutes ?? 0, searches * (source.minutesPerSearch ?? 0) * Math.max(1, scale));
+
+// fetchSearches(source, inputs) for the collector: runs source.feedScript for all inputs, one Python process
+// per result limit (a course can read more per search: searchLimits in config/courses.js), retries the
+// failed ones once, and returns one result per input. After a rate-limit error the retry waits
+// rateLimitDelayMs instead of retryDelayMs.
 export function createScraperFeedFetcher(
-  { dir, python, headless, timeoutMinutes, retryDelayMs = 15_000, rateLimitDelayMs = 5 * 60_000 },
+  { dir, python, headless, timeoutMinutes, limitPerSearch = {}, retryDelayMs = 15_000, rateLimitDelayMs = 5 * 60_000 },
   log = console.log,
 ) {
   const pythonPath = python || defaultPython(dir);
@@ -109,39 +115,60 @@ export function createScraperFeedFetcher(
     if (!python && !fs.existsSync(pythonPath)) {
       throw new Error(`The scraper's Python environment is missing (${pythonPath}). See README: "Scraper setup".`);
     }
-    const { days, limit } = inputs[0];
-    const run = (keywords) =>
-      runPython(pythonPath, [script, '--days', String(days), '--limit', String(limit), ...(headless ? ['--headless'] : []), ...keywords], {
-        cwd: dir,
-        // SCRAPER_TIMEOUT_MINUTES, or longer for a platform that needs it (source.minTimeoutMinutes).
-        timeoutMs: Math.max(timeoutMinutes, source.minTimeoutMinutes ?? 0) * 60_000,
-        onLog: (line) => log(`    ${line}`),
-        label: source.platform,
-      });
 
-    const keywords = inputs.map((input) => input.keyword);
-    const first = await run(keywords);
-    const results = parseFeedOutput(first.stdout);
-    let problem = first.problem;
+    // One group's searches (all with the same limit) -> { results: Map(keyword -> result), problem }.
+    const fetchGroup = async (group) => {
+      const { days, limit } = group[0];
+      // minutesPerSearch is for the platform's usual number of results; more results get more time.
+      const scale = limit / (limitPerSearch[source.platform] ?? limit);
+      const run = (keywords) =>
+        runPython(pythonPath, [script, '--days', String(days), '--limit', String(limit), ...(headless ? ['--headless'] : []), ...keywords], {
+          cwd: dir,
+          // SCRAPER_TIMEOUT_MINUTES, or longer for a platform that needs it (source.minTimeoutMinutes), and
+          // longer for more searches (source.minutesPerSearch each) and for more results per search.
+          timeoutMs: scraperTimeoutMinutes(source, timeoutMinutes, keywords.length, scale) * 60_000,
+          onLog: (line) => log(`    ${line}`),
+          label: source.platform,
+        });
 
-    const failed = keywords.filter((k) => results.get(k)?.status !== 'ok');
-    if (failed.length) {
-      const rateLimited = failed.some((k) => RATE_LIMITED.test(results.get(k)?.error ?? ''));
-      const delayMs = rateLimited ? rateLimitDelayMs : retryDelayMs;
-      log(
-        `    [${source.platform.toLowerCase()}] retrying ${failed.length} failed search(es) in ${Math.round(delayMs / 1000)}s` +
-          (rateLimited ? ` (${source.platform} is limiting how often we can ask, so waiting longer)` : first.problem ? ` (${first.problem})` : ''),
-      );
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-      const second = await run(failed);
-      for (const [keyword, result] of parseFeedOutput(second.stdout)) {
-        if (result.status === 'ok' || !results.has(keyword)) results.set(keyword, result);
+      const keywords = group.map((input) => input.keyword);
+      const first = await run(keywords);
+      const results = parseFeedOutput(first.stdout);
+      let problem = first.problem;
+
+      const failed = keywords.filter((k) => results.get(k)?.status !== 'ok');
+      if (failed.length) {
+        const rateLimited = failed.some((k) => RATE_LIMITED.test(results.get(k)?.error ?? ''));
+        const delayMs = rateLimited ? rateLimitDelayMs : retryDelayMs;
+        log(
+          `    [${source.platform.toLowerCase()}] retrying ${failed.length} failed search(es) in ${Math.round(delayMs / 1000)}s` +
+            (rateLimited ? ` (${source.platform} is limiting how often we can ask, so waiting longer)` : first.problem ? ` (${first.problem})` : ''),
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        const second = await run(failed);
+        for (const [keyword, result] of parseFeedOutput(second.stdout)) {
+          if (result.status === 'ok' || !results.has(keyword)) results.set(keyword, result);
+        }
+        problem = second.problem || problem;
       }
-      problem = second.problem || problem;
-    }
+      return { results, problem };
+    };
 
-    if (!results.size) throw new Error(`${source.platform} scraper returned no results (${problem || 'no output'})`);
+    // The searches by limit, in the order they come (usually one group: every search reads the same).
+    const groups = new Map();
+    for (const input of inputs) {
+      if (!groups.has(input.limit)) groups.set(input.limit, []);
+      groups.get(input.limit).push(input);
+    }
+    const done = new Map(); // limit -> { results, problem }
+    for (const [limit, group] of groups) done.set(limit, await fetchGroup(group));
+
+    if (![...done.values()].some((d) => d.results.size)) {
+      const problem = [...done.values()].map((d) => d.problem).find(Boolean);
+      throw new Error(`${source.platform} scraper returned no results (${problem || 'no output'})`);
+    }
     return inputs.map((input) => {
+      const { results, problem } = done.get(input.limit);
       const result = results.get(input.keyword);
       if (!result) return { status: 'error', items: [], error: `The ${source.platform} scraper stopped before this search${problem ? ` (${problem})` : ''}` };
       if (result.status !== 'ok') return { status: 'error', items: [], error: result.error };

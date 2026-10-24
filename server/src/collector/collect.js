@@ -461,8 +461,22 @@ async function storedListingIds(platform) {
   return keys.filter((k) => k.startsWith(`${platform}:`)).map((k) => k.slice(platform.length + 1));
 }
 
-const limitFor = (source) =>
-  source.via === 'scraper' ? (config.scraper.limitPerSearch[source.platform] ?? 100) : config.limitPerSearch;
+// Results to read per search: a run's own limit for the platform (limits, e.g. a catch-up run's), else the
+// course's (searchLimits in config/courses.js), else the platform's usual one (config.js).
+export const limitFor = (source, course, limits = {}) =>
+  limits[source.platform] ??
+  course?.searchLimits?.[source.platform] ??
+  (source.via === 'scraper'
+    ? (config.scraper.limitPerSearch[source.platform] ?? 100)
+    : (config.apifyLimitPerSearch[source.platform] ?? config.limitPerSearch));
+
+// The courses a run searches for: all of them, or only these ids.
+export function coursesFor(onlyCourses) {
+  if (!onlyCourses?.length) return COURSES;
+  const unknown = onlyCourses.filter((id) => !COURSES.some((c) => c.id === id));
+  if (unknown.length) throw new Error(`Unknown course: ${unknown.join(', ')} (courses: ${COURSES.map((c) => c.id).join(', ')})`);
+  return COURSES.filter((c) => onlyCourses.includes(c.id));
+}
 
 // fetchSearches(source, inputs) -> one { status, items, runId?, note?, error? } per input. It is
 // injected so the real run can route LinkedIn to Apify and the other platforms to the Python scraper
@@ -471,7 +485,18 @@ const limitFor = (source) =>
 // lookbackDays: search postings from the last N days (1 = the daily run). More than 1 is a backfill:
 // new jobs are dated by when they were posted (firstSeenDate), and LinkedIn skips the listings already
 // stored, so Apify doesn't charge for them again.
-export async function collect({ fetchSearches, now = new Date(), log = console.log, rawDir = config.rawDir, lookbackDays = 1 }) {
+// onlyCourses: search for these course ids only (e.g. a one-course catch-up); limits: results per search
+// on these platforms for this run ({ Naukri: 3000 }), over the courses' and platforms' own.
+export async function collect({
+  fetchSearches,
+  now = new Date(),
+  log = console.log,
+  rawDir = config.rawDir,
+  lookbackDays = 1,
+  onlyCourses = null,
+  limits = {},
+}) {
+  const courses = coursesFor(onlyCourses); // before the run starts, so a wrong id changes nothing
   const run = await startRun(now, log, lookbackDays);
   const pool = new JobPool();
   if (lookbackDays > 1) pool.backdateFrom = new Date(now.getTime() - lookbackDays * DAY_MS);
@@ -483,14 +508,14 @@ export async function collect({ fetchSearches, now = new Date(), log = console.l
     const sources = enabledSources(config.disabledSources);
     const skipIds = lookbackDays > 1 ? await storedListingIds('LinkedIn') : [];
     const tasksBySource = sources.map((source) =>
-      COURSES.flatMap((course) =>
-        searchesOf(course).flatMap(({ term, extra }) =>
+      courses.flatMap((course) =>
+        searchesOf(course, source).flatMap(({ term, extra }) =>
           (source.locations ?? [null]).map((location) => ({
             course,
             term,
             extra,
             location,
-            input: source.buildInput(term, limitFor(source), location, {
+            input: source.buildInput(term, limitFor(source, course, limits), location, {
               days: lookbackDays,
               skipIds: source.platform === 'LinkedIn' ? skipIds : [],
             }),

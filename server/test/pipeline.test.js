@@ -28,14 +28,21 @@ beforeEach(async () => {
 
 const naukriJob = (id, title, company) => ({ jobId: id, jdURL: `/job-listings-${id}`, title, companyName: company, minimumExperience: '3', maximumExperience: '6', placeholders: [{ type: 'location', label: 'Pune' }] });
 const naukriJobs = [naukriJob('N1', 'Data Engineer', 'Alpha'), naukriJob('N2', 'Data Scientist', 'Beta')];
-const indeedJob = { jobkey: 'i1', displayTitle: 'Production Support Engineer', company: 'Gamma', formattedLocation: 'Chennai, Tamil Nadu', snippet: '<li>3+ years of experience</li>' };
+// Indeed in the Apify actor's format (valig/indeed-jobs-scraper).
+const indeedItem = (key, title, company, city, text = '') => ({ key, title, employer: { name: company }, location: { countryCode: 'IN', admin3Code: city }, description: { text } });
+const indeedJob = indeedItem('i1', 'Production Support Engineer', 'Gamma', 'MAA', '3+ years of experience');
 
-const termHas = (input) => ['data engineer', 'data scientist'].includes(input.keyword);
+// What a search was for, whichever platform's input it is.
+const termOf = (input) => input.keywords ?? input.title ?? input.keyword;
+const termHas = (input) => ['data engineer', 'data scientist'].includes(termOf(input));
 const okBatch = (items) => async (source, inputs) => inputs.map((i) => ({ status: 'ok', items: termHas(i) ? items : [] }));
-const fetchWith = (scrapers) => (source, inputs) =>
-  source.via === 'apify'
-    ? perSearch(async () => ({ items: [] }), 3, { retryDelayMs: 0 })(source, inputs)
-    : (scrapers[source.platform] ?? (async () => inputs.map(() => ({ status: 'ok', items: [] }))))(source, inputs);
+// platforms: a stand-in for a platform's whole fetch (all its searches at once); the others find nothing.
+const fetchWith = (platforms) => (source, inputs) =>
+  platforms[source.platform]
+    ? platforms[source.platform](source, inputs)
+    : source.via === 'apify'
+      ? perSearch(async () => ({ items: [] }), 3, { retryDelayMs: 0 })(source, inputs)
+      : Promise.resolve(inputs.map(() => ({ status: 'ok', items: [] })));
 
 test('each platform is saved as soon as it finishes, without waiting for slower platforms', async () => {
   let releaseIndeed;
@@ -49,7 +56,7 @@ test('each platform is saved as soon as it finishes, without waiting for slower 
         for (let i = 0; i < 100 && (await Job.countDocuments()) === 0; i++) await new Promise((r) => setTimeout(r, 20));
         naukriJobsInDbWhileIndeedRunning = await Job.countDocuments();
         await indeedFinished;
-        return inputs.map((input) => ({ status: 'ok', items: input.keyword === 'production support' ? [indeedJob] : [] }));
+        return inputs.map((input) => ({ status: 'ok', items: termOf(input) === 'production support' ? [indeedJob] : [] }));
       },
     }),
     now: new Date('2026-10-16T01:30:00Z'),
@@ -67,12 +74,12 @@ test('big companies and jobs asking under 2 years are left out (5+ years are kep
   const tcs = naukriJob('N7', 'Data Engineer', 'Tata Consultancy Services');
   const junior = { ...naukriJob('N8', 'Data Scientist', 'Delta'), minimumExperience: '0', maximumExperience: '2' };
   const senior = { ...naukriJob('N9', 'Data Scientist', 'Gamma'), minimumExperience: '8', maximumExperience: '12' };
-  const sameAsAlpha = { jobkey: 'i2', displayTitle: 'Data Engineer', company: 'Alpha', formattedLocation: 'Pune, Maharashtra' };
-  const loneIndeed = { jobkey: 'i3', displayTitle: 'Data Engineer', company: 'Omega', formattedLocation: 'Pune, Maharashtra' };
+  const sameAsAlpha = indeedItem('i2', 'Data Engineer', 'Alpha', 'PNQ');
+  const loneIndeed = indeedItem('i3', 'Data Engineer', 'Omega', 'PNQ');
   const run = await collect({
     fetchSearches: fetchWith({
       Naukri: okBatch([...naukriJobs, tcs, junior, senior]),
-      Indeed: async (source, inputs) => inputs.map((i) => ({ status: 'ok', items: i.keyword === 'data engineer' ? [sameAsAlpha, loneIndeed] : [] })),
+      Indeed: async (source, inputs) => inputs.map((i) => ({ status: 'ok', items: termOf(i) === 'data engineer' ? [sameAsAlpha, loneIndeed] : [] })),
     }),
     now: new Date('2026-10-16T01:45:00Z'),
     log: () => {},
@@ -127,7 +134,7 @@ test("if one platform's save keeps failing, the next platform's save writes its 
         Naukri: okBatch(naukriJobs),
         Indeed: async (source, inputs) => {
           await new Promise((r) => setTimeout(r, 100)); // finishes after Naukri
-          return inputs.map((input) => ({ status: 'ok', items: input.keyword === 'production support' ? [indeedJob] : [] }));
+          return inputs.map((input) => ({ status: 'ok', items: termOf(input) === 'production support' ? [indeedJob] : [] }));
         },
       }),
       now: new Date('2026-10-16T04:00:00Z'),

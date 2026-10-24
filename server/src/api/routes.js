@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import express from 'express';
 import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
-import { EXCLUDED_COMPANIES } from '../config/filters.js';
+import { EXCLUDED_COMPANIES, underExperienceText } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
 import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
@@ -909,7 +909,7 @@ const contactValue = (manual) => ({
 // A non-filtered job's leftOutBy, in words.
 const LEFT_OUT_REASONS = {
   'big-company': 'Large IT services firm',
-  experience: 'Asks for less experience than the minimum',
+  experience: underExperienceText(),
   'no-experience': 'Experience not stated',
   'extra-search': 'From the extra searches',
 };

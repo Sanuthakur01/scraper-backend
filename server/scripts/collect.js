@@ -1,17 +1,20 @@
 // `npm run collect`: the whole pipeline in one command, from scraping to the database.
-//   LinkedIn  -> Apify
-//   Naukri, Indeed, Glassdoor -> our Python scraper in naukri-scraper/ (one Chrome window each)
+//   LinkedIn, Indeed  -> Apify
+//   Naukri, Glassdoor -> our Python scraper in naukri-scraper/ (one Chrome window each)
 // All platforms run at the same time; each one's jobs are saved as soon as it finishes.
 // Exit code: 0 = everything (or most things) saved, 1 = nothing could be collected or saved.
 // --days N (1-30): search postings from the last N days instead of the last day, e.g. a one-off
 // 30-day backfill: `npm run collect -- --days 30`. New jobs are then dated by when they were posted.
+// --course ID[,ID]: search for these courses only, e.g. `--course production-support`.
+// --limit N, or --limit Naukri=3000,Glassdoor=300: results per search for this run (all platforms, or these).
+// A one-course catch-up: `npm run collect -- --days 30 --course production-support --limit Naukri=3000,Glassdoor=300`
 import { config } from '../src/config.js';
-import { COURSES, searchesOf } from '../src/config/courses.js';
+import { searchesOf } from '../src/config/courses.js';
 import { experienceRangeText } from '../src/config/filters.js';
 import { enabledSources } from '../src/config/sources.js';
 import { connectDb, disconnectDb } from '../src/db.js';
-import { collect, perSearch, stopActiveRun } from '../src/collector/collect.js';
-import { checkApifyCredit, createApifyFetcher } from '../src/collector/apify.js';
+import { collect, coursesFor, limitFor, perSearch, stopActiveRun } from '../src/collector/collect.js';
+import { apifyCost, checkApifyCredit, createApifyFetcher } from '../src/collector/apify.js';
 import { createScraperFeedFetcher, stopScrapers } from '../src/collector/scraperFeed.js';
 
 // Ctrl+C or closing the window: close the scraper browsers and release the lock before exiting, so
@@ -36,35 +39,77 @@ if (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > 30) {
   process.exit(1);
 }
 
-const started = Date.now();
-const sources = enabledSources(config.disabledSources);
+const argAfter = (flag) => {
+  const at = process.argv.indexOf(flag);
+  return at > -1 ? (process.argv[at + 1] ?? '') : null;
+};
 
-// LinkedIn (Apify): if it can't run (no APIFY_TOKEN, or not enough Apify credit left this month), its
-// searches are reported as failed with the reason, and the other platforms are collected as usual.
-let linkedinProblem = '';
-if (sources.some((s) => s.via === 'apify')) {
-  if (!config.apifyToken) {
-    linkedinProblem = 'APIFY_TOKEN is not set, so LinkedIn was skipped. Add it to .env (or set DISABLED_SOURCES=LinkedIn to stop this message).';
-  } else {
-    const searches = COURSES.reduce((n, c) => n + searchesOf(c).length, 0);
-    const credit = await checkApifyCredit(config.apifyToken, { searches, limitPerSearch: config.limitPerSearch });
-    if (!credit.ok) {
-      const resets = credit.resetsAt ? `; it resets on ${new Date(credit.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : '';
-      linkedinProblem = `Not enough Apify credit for LinkedIn: $${credit.left.toFixed(2)} left this month, this run needs about $${credit.needed.toFixed(2)}${resets}. LinkedIn was skipped.`;
-    } else if (credit.left != null) {
-      console.log(`Apify credit: $${credit.left.toFixed(2)} left this month (this run uses about $${credit.needed.toFixed(2)} for LinkedIn).`);
-    }
-  }
-  if (linkedinProblem) console.log(`⚠ ${linkedinProblem}`);
+const courseArg = argAfter('--course');
+const onlyCourses = courseArg ? courseArg.split(',').map((s) => s.trim()).filter(Boolean) : null;
+let courses;
+try {
+  courses = coursesFor(onlyCourses);
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
 }
 
-const apifyFetch = config.apifyToken && !linkedinProblem ? createApifyFetcher(config.apifyToken) : null;
+const sources = enabledSources(config.disabledSources);
+
+// --limit 300 (every platform) or --limit Naukri=3000,LinkedIn=200
+const limitArg = argAfter('--limit');
+const limits = {};
+if (limitArg != null) {
+  const whole = /^\d+$/.test(limitArg.trim());
+  for (const part of whole ? sources.map((s) => `${s.platform}=${limitArg}`) : limitArg.split(',')) {
+    const [platform, value] = part.split('=').map((s) => s.trim());
+    const known = sources.find((s) => s.platform.toLowerCase() === platform?.toLowerCase());
+    const n = Number(value);
+    if (!known || !Number.isInteger(n) || n < 1 || n > 10_000) {
+      console.error(`--limit: "${part}" should be like Naukri=3000 (platforms: ${sources.map((s) => s.platform).join(', ')}; 1-10000).`);
+      process.exit(1);
+    }
+    limits[known.platform] = n;
+  }
+}
+
+const started = Date.now();
+
+// The Apify platforms (LinkedIn, Indeed): if they can't run (no APIFY_TOKEN, or not enough Apify credit left
+// this month), their searches are reported as failed with the reason, and the other platforms are collected
+// as usual.
+const apifySources = sources.filter((s) => s.via === 'apify');
+const apifyNames = apifySources.map((s) => s.platform).join(' and ');
+let apifyProblem = '';
+if (apifySources.length) {
+  if (!config.apifyToken) {
+    apifyProblem = `APIFY_TOKEN is not set, so ${apifyNames} ${apifySources.length > 1 ? 'were' : 'was'} skipped. Add it to .env (or set DISABLED_SOURCES=${apifySources.map((s) => s.platform).join(',')} to stop this message).`;
+  } else {
+    // Every Apify search, with the results it may read (a course or this run can read more) at its platform's price.
+    const costs = apifySources.map((source) => {
+      const results = courses.flatMap((c) => searchesOf(c, source).map(() => limitFor(source, c, limits)));
+      const usd = apifyCost({ searches: results.length, results: results.reduce((n, r) => n + r, 0), pricePerResult: source.pricePerResult });
+      return { platform: source.platform, usd };
+    });
+    const credit = await checkApifyCredit(config.apifyToken, { needed: costs.reduce((n, c) => n + c.usd, 0) });
+    if (!credit.ok) {
+      const resets = credit.resetsAt ? `; it resets on ${new Date(credit.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : '';
+      apifyProblem = `Not enough Apify credit for ${apifyNames}: $${credit.left.toFixed(2)} left this month, this run needs about $${credit.needed.toFixed(2)}${resets}. ${apifyNames} ${apifySources.length > 1 ? 'were' : 'was'} skipped.`;
+    } else if (credit.left != null) {
+      const each = costs.map((c) => `${c.platform} $${c.usd.toFixed(2)}`).join(', ');
+      console.log(`Apify credit: $${credit.left.toFixed(2)} left this month (this run uses about $${credit.needed.toFixed(2)}: ${each}).`);
+    }
+  }
+  if (apifyProblem) console.log(`⚠ ${apifyProblem}`);
+}
+
+const apifyFetch = config.apifyToken && !apifyProblem ? createApifyFetcher(config.apifyToken) : null;
 const scraperFetch = createScraperFeedFetcher(config.scraper);
 const fetchers = {
   apify: apifyFetch
     ? perSearch((source, input) => apifyFetch(source.actorId, input), config.apifyConcurrency)
     : async () => {
-        throw new Error(linkedinProblem);
+        throw new Error(apifyProblem);
       },
   scraper: scraperFetch,
 };
@@ -90,7 +135,9 @@ try {
   if (lookbackDays > 1) {
     console.log(`Backfill: postings from the last ${lookbackDays} days. New jobs are dated by when they were posted.`);
   }
-  const run = await collect({ fetchSearches: (source, inputs) => fetchers[source.via](source, inputs), lookbackDays });
+  if (onlyCourses) console.log(`Only: ${courses.map((c) => c.name).join(', ')}.`);
+  if (Object.keys(limits).length) console.log(`Results per search: ${Object.entries(limits).map(([p, n]) => `${p} ${n}`).join(', ')}.`);
+  const run = await collect({ fetchSearches: (source, inputs) => fetchers[source.via](source, inputs), lookbackDays, onlyCourses, limits });
   const t = run.totals;
   console.log(`\n========== Collection ${run.status.toUpperCase()} in ${Math.round((Date.now() - started) / 60_000)} min ==========`);
   for (const p of run.platforms) {

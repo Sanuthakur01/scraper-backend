@@ -2,7 +2,7 @@
 // A fake Apify client stands in for the real one, so nothing is spent.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkApifyCredit, createApifyFetcher } from '../src/collector/apify.js';
+import { apifyCost, checkApifyCredit, createApifyFetcher } from '../src/collector/apify.js';
 import { perSearch } from '../src/collector/collect.js';
 
 function fakeClient({ callResult, waits = [], callError, limits, limitsError } = {}) {
@@ -78,4 +78,13 @@ test('the credit check: enough, not enough, and Apify not answering', async () =
   const short = await checkApifyCredit('t', run, at(18.8, 19));
   assert.deepEqual([short.ok, short.resetsAt], [false, '2026-11-19T23:59:59Z']);
   assert.equal((await checkApifyCredit('t', run, { client: fakeClient({ limitsError: 'network down' }) })).ok, true, 'unknown: go ahead');
+  // Searches reading different numbers of results: their total counts.
+  const mixed = await checkApifyCredit('t', { searches: 3, results: 100 + 100 + 300 }, at(1, 19));
+  assert.ok(Math.abs(mixed.needed - (500 * 0.0004 + 3 * 0.001)) < 1e-9);
+  // Platforms with their own price (LinkedIn $0.40, Indeed $0.10 per 1,000 results), added up first.
+  const linkedin = apifyCost({ searches: 46, results: 4600 });
+  const indeed = apifyCost({ searches: 46, results: 4600, pricePerResult: 0.0001 });
+  assert.ok(Math.abs(linkedin - 1.886) < 1e-9 && Math.abs(indeed - 0.506) < 1e-9);
+  const both = await checkApifyCredit('t', { needed: linkedin + indeed }, at(17.5, 19));
+  assert.deepEqual([both.ok, Math.round(both.needed * 1000)], [false, 2392], '$2.39 needed, $1.50 left');
 });

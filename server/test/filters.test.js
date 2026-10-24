@@ -33,8 +33,8 @@ test('other companies are kept, including ones whose names merely start like an 
   }
 });
 
-test('experience: the minimum asked must be at least 2 years, with no upper limit', () => {
-  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 10, null].map(experienceInRange), [false, false, true, true, true, true, true, true, false]);
+test('experience: the minimum asked must be at least 1 year (fresher jobs are left out), with no upper limit', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 10, null].map(experienceInRange), [false, true, true, true, true, true, true, true, false]);
 });
 
 test('jobs are checked before saving', () => {
@@ -42,7 +42,9 @@ test('jobs are checked before saving', () => {
   const tcs = buildJob(naukri, naukriItem('Tata Consultancy Services', 3, 5), now);
   assert.equal(tcs.skip, 'big-company');
   assert.equal(tcs.job?.company, 'Tata Consultancy Services', 'left out, but its details come back for the non-filtered jobs');
-  assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 3), now).skip, 'experience', '1-3 yrs starts below 2');
+  assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 0, 2), now).skip, 'experience', '0-2 yrs: a fresher job');
+  assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 3), now).job?.experienceBand, '1', '1-3 yrs is kept, in the 1 yr group');
+  assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 5), now).skip, undefined, '1-5 yrs is kept');
   assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 6, 9), now).job?.experienceBand, '5+', '6-9 yrs is kept, in the 5+ (more than 5) group');
   assert.ok(buildJob(naukri, naukriItem('Alpha Analytics', 3, 6), now).job, '3-6 yrs is kept');
   assert.ok(buildJob(naukri, naukriItem('Alpha Analytics', 5, 8), now).job, '5-8 yrs is kept');

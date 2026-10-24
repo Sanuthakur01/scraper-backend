@@ -7,9 +7,15 @@
 //   map(item, now)                    -> our common job shape, from one item of that source's output
 //                                        (description and contactText are searched for phones and emails)
 //   locations (optional)              -> search each term once per location, for sources that can't search all of India
-// Apify is used only for LinkedIn. Naukri, Indeed and Glassdoor come from our own scraper.
-// For the Apify source, field names come from the actor's README on apify.com. Check them against a
-// real run in the Apify Console if it suddenly returns 0 jobs.
+//   minTimeoutMinutes, minutesPerSearch (scraper, optional) -> its Python process may run at least this long, and
+//                                        at least minutesPerSearch per search (SCRAPER_TIMEOUT_MINUTES otherwise)
+//   pricePerResult (apify)            -> what one result costs, for the credit check before a run
+//   onlyTerms(course) (optional)      -> run only these of the course's searches here (default: all of them)
+// LinkedIn and Indeed come from Apify; Naukri and Glassdoor from our own scraper. (Indeed came from the
+// scraper's indeed_feed.py until 24 Oct 2026; it still works: via 'scraper', feedScript 'indeed_feed.py'
+// and its old map in git history.)
+// For the Apify sources, field names come from the actors' READMEs on apify.com. Check them against a
+// real run in the Apify Console if one suddenly returns 0 jobs.
 
 import { stripHtml } from '../normalize.js';
 
@@ -35,11 +41,52 @@ const ageToDate = (age, now) => {
   return new Date(now.getTime() - Number(m[1]) * (m[2].toLowerCase() === 'h' ? 3_600_000 : DAY_MS));
 };
 
+// Indeed's place codes (location.admin3Code, mostly airport codes; seen on 24 Oct 2026) -> a city name our
+// city groups know. Its location.city is usually empty. An unknown code: "city not stated", never a guess.
+const INDEED_CITIES = {
+  BLR: 'Bengaluru', HYD: 'Hyderabad', PNQ: 'Pune', MAA: 'Chennai', BOM: 'Mumbai', NVM: 'Navi Mumbai',
+  DEL: 'New Delhi', GRG: 'Gurugram', CCU: 'Kolkata', AMD: 'Ahmedabad', COK: 'Kochi', TRV: 'Thiruvananthapuram',
+  CJB: 'Coimbatore', JAI: 'Jaipur', IXC: 'Chandigarh', IDR: 'Indore', NAG: 'Nagpur', BDQ: 'Vadodara', STV: 'Surat',
+  BBI: 'Bhubaneswar', LKO: 'Lucknow', MYQ: 'Mysuru', IXE: 'Mangaluru', VTZ: 'Visakhapatnam', VGA: 'Vijayawada',
+  IXM: 'Madurai', BHO: 'Bhopal', ISK: 'Nashik', PAT: 'Patna', IXR: 'Ranchi', GAU: 'Guwahati', DED: 'Dehradun',
+  GOI: 'Goa',
+};
+// A state code that is one city by itself (location.admin1Code, when there is no place code).
+const INDEED_STATE_CITIES = { DL: 'New Delhi', CH: 'Chandigarh', GA: 'Goa' };
+
+// "Pune", "Pune (Remote)", "Remote" or "India" (city not stated), for parseLocation.
+function indeedLocation({ location = {}, attributes = {} }) {
+  const place = location?.city || INDEED_CITIES[location?.admin3Code] || INDEED_STATE_CITIES[location?.admin1Code] || 'India';
+  const remote = Object.values(attributes ?? {}).some((tag) => /^(remote|work from home)$/i.test(String(tag).trim()));
+  if (!remote || /remote/i.test(place)) return place;
+  return place === 'India' ? 'Remote' : `${place} (Remote)`;
+}
+
+// { min: 600000, max: 1000000, unitOfWork: 'YEAR', currencyCode: 'INR' } -> "₹6,00,000 - ₹10,00,000 a year",
+// as Indeed itself writes it.
+const PAY_PERIODS = { YEAR: 'a year', MONTH: 'a month', WEEK: 'a week', DAY: 'a day', HOUR: 'an hour' };
+function indeedSalary(pay) {
+  if (!pay || (pay.min == null && pay.max == null)) return '';
+  const money = (n) => `${!pay.currencyCode || pay.currencyCode === 'INR' ? '₹' : `${pay.currencyCode} `}${Math.round(n).toLocaleString('en-IN')}`;
+  const amount =
+    pay.min != null && pay.max != null && pay.min !== pay.max
+      ? `${money(pay.min)} - ${money(pay.max)}`
+      : pay.min != null && pay.max == null
+        ? `From ${money(pay.min)}`
+        : pay.min == null
+          ? `Up to ${money(pay.max)}`
+          : money(pay.min);
+  return PAY_PERIODS[pay.unitOfWork] ? `${amount} ${PAY_PERIODS[pay.unitOfWork]}` : amount;
+}
+
 export const SOURCES = [
   {
     platform: 'LinkedIn',
     via: 'apify',
     actorId: 'valig/linkedin-jobs-scraper',
+    pricePerResult: 0.0004, // $0.40 per 1,000 results on Apify's free plan (23 Oct 2026)
+    // The expensive platform: only each course's linkedinSearchTerms (config/courses.js), not every search.
+    onlyTerms: (course) => course.linkedinSearchTerms,
     // datePosted r86400 = posted in the past 24 hours (r604800 week, r2592000 month)
     buildInput: (term, limit, location, { days = 1, skipIds = [] } = {}) => ({
       keywords: term,
@@ -64,6 +111,7 @@ export const SOURCES = [
     platform: 'Naukri',
     via: 'scraper',
     feedScript: 'naukri_feed.py',
+    minutesPerSearch: 1, // about 15 seconds each on 23 Oct 2026
     // Newest first, posted in the last day, all of India. Items are Naukri's own search API job objects.
     // Naukri's jobAge filter offers 1, 3, 7, 15 or 30 days.
     buildInput: (term, limit, location, { days = 1 } = {}) => ({ keyword: term, days: coverDays(days, [1, 3, 7, 15, 30]), limit }),
@@ -91,31 +139,37 @@ export const SOURCES = [
   },
   {
     platform: 'Indeed',
-    via: 'scraper',
-    feedScript: 'indeed_feed.py',
-    // Not logged in, Indeed takes about 8 pages per search term (72 in all), slower after each "too many
-    // requests": on 20 Oct 2026 that took over 30 minutes. Its scraper gets at least this long.
-    minTimeoutMinutes: 60,
-    // in.indeed.com, newest first, posted in the last day. Items are the job objects Indeed embeds
-    // in its search pages.
-    // Indeed's fromage takes any number of days.
-    buildInput: (term, limit, location, { days = 1 } = {}) => ({ keyword: term, days, limit }),
+    via: 'apify',
+    actorId: 'valig/indeed-jobs-scraper',
+    pricePerResult: 0.0001, // $0.10 per 1,000 results on Apify's free plan (23 Oct 2026), a quarter of LinkedIn's
+    // in.indeed.com (country 'in'), all of India. Its date filter offers 1, 3, 7 or 14 days, so a 30-day
+    // backfill reaches 14 days back on Indeed. Items carry the full job description (our old scraper only
+    // got a snippet), so most Indeed jobs now say how much experience they ask for.
+    buildInput: (term, limit, location, { days = 1 } = {}) => ({
+      country: 'in',
+      title: term,
+      location: '',
+      limit,
+      datePosted: String(coverDays(days, [1, 3, 7, 14])),
+    }),
     map: (item) => ({
-      sourceId: item.jobkey,
-      title: item.displayTitle || item.title,
-      company: item.company,
-      locationText: item.formattedLocation, // "Chennai, Tamil Nadu", "Remote in Mumbai, Maharashtra"
-      countryCode: 'IN', // the search itself is India-only
-      url: item.jobkey ? `https://in.indeed.com/viewjob?jk=${item.jobkey}` : '',
-      postedAt: toDate(item.pubDate ?? item.createDate),
-      salaryText: item.salarySnippet?.text,
-      description: stripHtml(item.snippet),
+      sourceId: item.key, // Indeed's job key, as our old scraper saved it: the same job matches
+      title: item.title,
+      company: item.employer?.name,
+      locationText: indeedLocation(item),
+      countryCode: item.location?.countryCode || 'IN',
+      url: item.key ? `https://in.indeed.com/viewjob?jk=${item.key}` : item.url,
+      postedAt: toDate(item.dateOnIndeed ?? item.datePublished), // when it appeared on Indeed (reposts: again)
+      salaryText: indeedSalary(item.baseSalary),
+      description: item.description?.text ?? stripHtml(item.description?.html),
+      skills: Object.values(item.attributes ?? {}), // Indeed's own tags: "Python", "Power BI", "Full-time"...
     }),
   },
   {
     platform: 'Glassdoor',
     via: 'scraper',
     feedScript: 'glassdoor_feed.py',
+    minutesPerSearch: 1, // about 12 seconds each on 23 Oct 2026
     // Searches all of India (Glassdoor location id 115), newest first, posted in the last day.
     // Items are job cards read by glassdoor_feed.py.
     // Glassdoor's fromAge filter offers 1, 3, 7, 14 or 30 days.

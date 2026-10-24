@@ -33,14 +33,19 @@ export const config = {
   mongoUri: process.env.MONGODB_URI,
   apifyToken: process.env.APIFY_TOKEN,
 
+  // Results per search: LinkedIn (APIFY_LIMIT_PER_SEARCH), and the other Apify platforms by name.
   limitPerSearch: int(process.env.APIFY_LIMIT_PER_SEARCH, 100),
+  apifyLimitPerSearch: {
+    Indeed: int(process.env.INDEED_LIMIT_PER_SEARCH, 100),
+  },
   apifyConcurrency: int(process.env.APIFY_CONCURRENCY, 3),
   retentionDays: int(process.env.RETENTION_DAYS, 90),
 
-  // Only jobs whose minimum experience is within this range are kept. max null (the default): no upper
-  // limit, so jobs asking for 5+ years are kept too.
+  // Only jobs whose minimum experience is within this range are kept. min 1 (since 24 Oct 2026; it was 2):
+  // "1-3 yrs" and "1-5 yrs" are kept, fresher jobs (0 years) are Non-filtered. max null (the default): no
+  // upper limit, so jobs asking for 5+ years are kept too.
   experience: {
-    min: int(process.env.EXPERIENCE_MIN, 2),
+    min: int(process.env.EXPERIENCE_MIN, 1),
     max: int(process.env.EXPERIENCE_MAX, null),
   },
 
@@ -69,7 +74,6 @@ export const config = {
 
     limitPerSearch: {
       Naukri: int(process.env.NAUKRI_LIMIT_PER_SEARCH, 200),
-      Indeed: int(process.env.INDEED_LIMIT_PER_SEARCH, 100),
       Glassdoor: int(process.env.GLASSDOOR_LIMIT_PER_SEARCH, 100),
     },
   },

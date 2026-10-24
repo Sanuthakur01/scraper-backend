@@ -22,9 +22,9 @@ export function isExcludedCompany(name) {
   return Boolean(key) && excludedKeys.some((excluded) => key === excluded || key.startsWith(`${excluded} `));
 }
 
-// The minimum experience a job asks for must be at least EXPERIENCE_MIN years (default 2), and at most
-// EXPERIENCE_MAX when that is set (no upper limit by default): "3-6 yrs" and "8+ yrs" are kept,
-// "0-2 yrs" and "1-3 yrs" are not.
+// The minimum experience a job asks for must be at least EXPERIENCE_MIN years (default 1), and at most
+// EXPERIENCE_MAX when that is set (no upper limit by default): "1-3 yrs", "1-5 yrs", "3-6 yrs" and "8+ yrs"
+// are kept; fresher jobs ("0-2 yrs", "Fresher") are not.
 export const experienceInRange = (min) =>
   min != null && min >= config.experience.min && (config.experience.max == null || min <= config.experience.max);
 
@@ -41,6 +41,11 @@ export function leftOutReason({ company, experienceMin }) {
 // extra search found it and no main search kept it (fromExtraSearch; extraSearchTerms in config/courses.js).
 export const nonFilteredReason = (job) => leftOutReason(job) ?? (job.fromExtraSearch ? 'extra-search' : null);
 
-// "2+" (no upper limit) or "2-5", for messages.
+// A Non-filtered job's experience reason (leftOutBy 'experience') in words: with a 1-year minimum these are
+// the fresher jobs.
+export const underExperienceText = () =>
+  config.experience.min <= 1 ? 'Fresher (asks for no experience)' : `Asks for under ${config.experience.min} years`;
+
+// "1+" (no upper limit) or "1-5", for messages.
 export const experienceRangeText = () =>
   config.experience.max == null ? `${config.experience.min}+` : `${config.experience.min}-${config.experience.max}`;

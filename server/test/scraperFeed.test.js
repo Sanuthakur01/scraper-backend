@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { createScraperFeedFetcher, parseFeedOutput, readSavedFeed } from '../src/collector/scraperFeed.js';
+import { createScraperFeedFetcher, parseFeedOutput, readSavedFeed, scraperTimeoutMinutes } from '../src/collector/scraperFeed.js';
+import { SOURCES } from '../src/config/sources.js';
 
 test('feed output: JSON lines are read by keyword, anything else is ignored', () => {
   const stdout = [
@@ -131,7 +132,22 @@ test('a platform that needs longer gets its own time limit; a scraper stopped by
   const roomy = createScraperFeedFetcher({ dir, python: process.execPath, headless: false, timeoutMinutes: limit, retryDelayMs: 0 }, (l) => logs.push(l));
   await roomy({ platform: 'Indeed', feedScript: 'indeed_feed.py', minTimeoutMinutes: 0.1 }, inputs);
   assert.ok(!logs.some((l) => l.includes('retrying')), "with the platform's own longer limit, one run does both terms");
+
+  logs.length = 0;
+  const perSearch = createScraperFeedFetcher({ dir, python: process.execPath, headless: false, timeoutMinutes: limit, retryDelayMs: 0 }, (l) => logs.push(l));
+  await perSearch({ platform: 'Indeed', feedScript: 'indeed_feed.py', minutesPerSearch: 0.012 }, inputs);
+  assert.ok(!logs.some((l) => l.includes('retrying')), 'more searches get more time (minutesPerSearch each)');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("each scraper's time limit grows with its number of searches", () => {
+  const source = (platform) => SOURCES.find((s) => s.platform === platform);
+  const minutes = (platform, searches) => scraperTimeoutMinutes(source(platform), 30, searches);
+  const slow = { minTimeoutMinutes: 60, minutesPerSearch: 7 }; // like Indeed's old scraper
+  assert.equal(scraperTimeoutMinutes(slow, 30, 46), 46 * 7, '7 minutes a search');
+  assert.equal(scraperTimeoutMinutes(slow, 30, 3), 60, 'at least its own minimum');
+  assert.equal(minutes('Naukri', 46), 46);
+  assert.equal(minutes('Glassdoor', 12), 30, 'SCRAPER_TIMEOUT_MINUTES when that is longer');
 });
 
 test('a missing feed script gives a clear error', async () => {
@@ -147,4 +163,42 @@ test('feed files saved by older runs can still be read, even after being moved',
   fs.writeFileSync(path.join(dir, 'naukri-old.json'), JSON.stringify({ 'data analyst': { status: 'ok', items: [{ jobId: '7' }] } }));
   assert.equal(readSavedFeed(path.join('gone', 'naukri-old.json'), 'data analyst', dir)[0].jobId, '7');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('searches with different limits run as separate scraper runs, each with its own limit', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scraper-feed-test-'));
+  fs.mkdirSync(path.join(dir, 'scraper_file'));
+  // Answers each keyword with the --limit it was run with, and logs each run.
+  fs.writeFileSync(
+    path.join(dir, 'scraper_file', 'naukri_feed.py'),
+    `const fs = require('fs');
+     const args = process.argv.slice(2);
+     const limit = Number(args[args.indexOf('--limit') + 1]);
+     const keywords = args.filter((a, i, all) => !a.startsWith('--') && !all[i - 1]?.startsWith('--'));
+     fs.appendFileSync('calls.log', limit + ':' + keywords.join('|') + '\\n');
+     for (const keyword of keywords) console.log(JSON.stringify({ keyword, status: 'ok', items: [{ keyword, limit }] }));`,
+  );
+  const fetchFromScraper = createScraperFeedFetcher({ dir, python: process.execPath, headless: false, timeoutMinutes: 1, limitPerSearch: { Naukri: 200 } }, () => {});
+  const inputs = [
+    { keyword: 'data analyst', days: 1, limit: 200 },
+    { keyword: 'production support', days: 1, limit: 500 },
+    { keyword: 'data engineer', days: 1, limit: 200 },
+    { keyword: 'application support', days: 1, limit: 500 },
+  ];
+  const results = await fetchFromScraper({ platform: 'Naukri', feedScript: 'naukri_feed.py' }, inputs);
+  assert.deepEqual(
+    results.map((r) => `${r.items[0].keyword} ${r.items[0].limit}`),
+    ['data analyst 200', 'production support 500', 'data engineer 200', 'application support 500'],
+    'each result goes back to its own search',
+  );
+  const calls = fs.readFileSync(path.join(dir, 'calls.log'), 'utf8').trim().split('\n');
+  assert.deepEqual(calls, ['200:data analyst|data engineer', '500:production support|application support']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('more results per search get proportionally more time', () => {
+  const naukri = SOURCES.find((s) => s.platform === 'Naukri');
+  assert.equal(scraperTimeoutMinutes(naukri, 30, 37, 500 / 200), 92.5, '37 searches reading 500 instead of 200');
+  assert.equal(scraperTimeoutMinutes(naukri, 30, 37, 3000 / 200), 555, 'a catch-up reading 3000 each');
+  assert.equal(scraperTimeoutMinutes(naukri, 30, 37, 0.5), 37, 'fewer results never shorten it');
 });
