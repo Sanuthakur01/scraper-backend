@@ -130,7 +130,7 @@ const istTime = (date) =>
 
 // Starts a run, unless another collection is still running. coverageFrom: the earliest posting date
 // the run searched for (its lookback), so the report knows which weeks have data.
-async function startRun(now, log, lookbackDays = 1) {
+async function startRun(now, log, lookbackDays = 1, onlyCourses = null) {
   const abandoned = (await CollectorRun.find({ status: 'running' }).lean()).filter(isAbandoned);
   if (abandoned.length) {
     await CollectorRun.updateMany(
@@ -148,6 +148,7 @@ async function startRun(now, log, lookbackDays = 1) {
     status: 'running',
     lookbackDays,
     coverageFrom: new Date(now.getTime() - lookbackDays * DAY_MS),
+    ...(onlyCourses?.length ? { onlyCourses } : {}),
   });
   // If two collections start at the same moment, the one that started first wins.
   const startedEarlier = (other) =>
@@ -497,7 +498,7 @@ export async function collect({
   limits = {},
 }) {
   const courses = coursesFor(onlyCourses); // before the run starts, so a wrong id changes nothing
-  const run = await startRun(now, log, lookbackDays);
+  const run = await startRun(now, log, lookbackDays, onlyCourses && courses.map((c) => c.id));
   const pool = new JobPool();
   if (lookbackDays > 1) pool.backdateFrom = new Date(now.getTime() - lookbackDays * DAY_MS);
   const summaries = [];

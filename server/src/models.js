@@ -129,6 +129,7 @@ const collectorRunSchema = new mongoose.Schema(
     heartbeatAt: Date, // updated every 30 seconds while it runs
     finishedAt: Date,
     lookbackDays: Number, // postings searched from the last N days (1 = daily; more = a backfill)
+    onlyCourses: { type: [String], default: undefined }, // `--course`: the only courses searched (none = all)
     coverageFrom: Date, // startedAt minus lookbackDays: the earliest posting date this run looked for
     status: { type: String, enum: ['running', 'success', 'partial', 'failed'], default: 'running' },
     platforms: [platformSchema],

@@ -274,6 +274,8 @@ test('Production Support reads more per search on Naukri and Glassdoor; a run ca
   assert.deepEqual([...new Set(into.Naukri.values())], [3000], "the run's own limit wins");
   assert.equal(into.Glassdoor.get('production support'), 200, "the course's limit where the run has none");
   assert.ok(run.searches.every((s) => s.course === 'production-support'));
+  const stored = await CollectorRun.findById(run._id).lean();
+  assert.deepEqual([stored.lookbackDays, stored.onlyCourses], [30, ['production-support']], 'the run records it searched one course');
 
   const runs = await CollectorRun.countDocuments();
   await assert.rejects(collect({ fetchSearches: recording(seen()), onlyCourses: ['production'], ...quiet }), /Unknown course: production/);

@@ -64,13 +64,28 @@ async function dailySince() {
   return run?.startedAt ?? null;
 }
 
-// A period is compared with the one before only when a collection ran on every IST day of both (any
+// A period is compared with the one before only when every IST day of both was collected (any
 // finished run). A day without a run has almost no new jobs, and the next run's count then holds two
 // days, so comparing would show a huge jump that didn't happen ("+5900% vs previous day"). Days
 // before the daily collection began have no runs, so they are never compared either.
+// A missed day still counts when a short catch-up (`--days 2` or `--days 3`, every course) ran within
+// those days after it: it dates its jobs by when they were posted, and a posting from a day or two ago is
+// almost always still listed. A longer backfill (e.g. 30 days) doesn't: the postings already taken down
+// by then are missing, so its days would look quieter than they were.
+const CATCH_UP_DAYS = 3;
+
 async function collectedEveryDay(from, to) {
-  const runs = await CollectorRun.find({ status: { $in: ['success', 'partial'] }, startedAt: { $gte: from, $lt: to } }, { startedAt: 1 }).lean();
-  const collected = new Set(runs.map((run) => istDate(run.startedAt)));
+  const runs = await CollectorRun.find(
+    { status: { $in: ['success', 'partial'] }, startedAt: { $gte: from, $lt: new Date(to.getTime() + CATCH_UP_DAYS * DAY_MS) } },
+    { startedAt: 1, lookbackDays: 1, onlyCourses: 1 },
+  ).lean();
+  const collected = new Set();
+  for (const run of runs) {
+    const lookback = run.lookbackDays ?? 1;
+    const reachesBack = lookback <= CATCH_UP_DAYS && !run.onlyCourses?.length ? lookback - 1 : 0;
+    const day = istDayStart(istDate(run.startedAt)).getTime();
+    for (let k = 0; k <= reachesBack; k++) collected.add(istDate(new Date(day - k * DAY_MS)));
+  }
   for (let day = from.getTime(); day < to.getTime(); day += DAY_MS) {
     if (!collected.has(istDate(new Date(day)))) return false;
   }
@@ -573,11 +588,15 @@ router.get('/role-jobs', requirePermission('view'), wrap(async (req, res) => {
   const pageSize = Math.min(clampDays(req.query.limit, 25, 100), 100);
   const page = clampDays(req.query.page, 1, 100_000);
   const J = jobsFor(req);
-  const [items, filtered, nonFiltered] = await Promise.all([
+  // The same number for the period before (in the view's set), when the two can be compared.
+  const prevStart = new Date(range.start.getTime() - range.days * DAY_MS);
+  const [items, filtered, nonFiltered, comparable] = await Promise.all([
     J.find(match, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
     Job.countDocuments(match),
     NonFilteredJob.countDocuments(match),
+    collectedEveryDay(prevStart, range.end),
   ]);
+  const previous = comparable ? await J.countDocuments({ ...match, firstSeenAt: { $gte: prevStart, $lt: range.start } }) : null;
   const view = J === NonFilteredJob ? 'nonfiltered' : 'filtered';
   const total = view === 'nonfiltered' ? nonFiltered : filtered;
   res.json({
@@ -589,6 +608,8 @@ router.get('/role-jobs', requirePermission('view'), wrap(async (req, res) => {
     total,
     filtered,
     nonFiltered,
+    previous, // the period before, or null when it can't be compared
+    comparable,
     page,
     pageSize,
     pages: Math.max(1, Math.ceil(total / pageSize)),

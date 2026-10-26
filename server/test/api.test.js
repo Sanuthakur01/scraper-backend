@@ -596,12 +596,27 @@ test('a day without a collection run is never compared (it would look like a hug
   assert.equal((await (await fetch(`${base}/summary?days=1`)).json()).comparable, true, 'collected yesterday and today');
 
   await CollectorRun.deleteMany(yesterday);
+  const comparable = async () => (await (await fetch(`${base}/summary?days=1`)).json()).comparable;
+  const catchUp = (extra) => CollectorRun.create({ startedAt: new Date(), finishedAt: new Date(), status: 'success', ...extra });
   try {
     const summary = await (await fetch(`${base}/summary?days=1`)).json();
     assert.equal(summary.comparable, false, 'nothing was collected yesterday');
     assert.deepEqual(summary.previous, {});
     assert.equal((await (await fetch(`${base}/course/data-analyst?days=1`)).json()).previous, 0);
+
+    // A catch-up today that reached back over yesterday (`--days 2`) makes up for it; one of only some
+    // courses, or a long backfill (its days miss the postings already taken down), doesn't.
+    let run = await catchUp({ lookbackDays: 2, onlyCourses: ['production-support'] });
+    assert.equal(await comparable(), false, 'a catch-up of one course');
+    await CollectorRun.deleteOne({ _id: run._id });
+    run = await catchUp({ lookbackDays: 30 });
+    assert.equal(await comparable(), false, 'a 30-day backfill');
+    await CollectorRun.deleteOne({ _id: run._id });
+    run = await catchUp({ lookbackDays: 2 });
+    assert.equal(await comparable(), true, 'a 2-day catch-up covers yesterday');
+    await CollectorRun.deleteOne({ _id: run._id });
   } finally {
+    await CollectorRun.deleteMany({ startedAt: { $gte: new Date(todayStart) }, lookbackDays: { $in: [2, 30] } });
     await CollectorRun.insertMany(runs);
   }
 });
@@ -1115,6 +1130,7 @@ test('SRE Openings: SRE jobs of the period in the view\'s set (Filtered or Non-f
     job(4, 'Quality & Reliability Engineer', 2), // hardware quality: not SRE
     job(5, 'Production Support Engineer', 2), // not SRE
     job(6, 'Site Reliability Lead', 24 * 20), // too old for the last day / 7 days
+    job(9, 'Site Reliability Engineer III', 24 * 9), // the 7 days before the last 7
   ]);
   await NonFilteredJob.create([
     job(7, 'Site Reliability Engineer (SRE)', 4, { leftOutBy: 'extra-search', fromExtraSearch: true }),
@@ -1132,6 +1148,7 @@ test('SRE Openings: SRE jobs of the period in the view\'s set (Filtered or Non-f
     assert.deepEqual([body.total, body.filtered, body.nonFiltered], [3, 3, 2], 'the view\'s count, and both sets\'');
     assert.ok(body.items.every((j) => j.leftOutBy === undefined));
     assert.ok(body.items[0].contact && body.items[0].links, 'jobs as the job list sends them');
+    assert.deepEqual([body.previous, body.comparable], [1, true], 'the 7 days before, for "▲ vs previous 7 days"');
 
     ({ body } = await get('role=sre&days=7&view=nonfiltered'));
     assert.equal(body.view, 'nonfiltered');
@@ -1139,9 +1156,21 @@ test('SRE Openings: SRE jobs of the period in the view\'s set (Filtered or Non-f
     assert.deepEqual([body.total, body.filtered, body.nonFiltered], [2, 3, 2]);
 
     ({ body } = await get('role=sre&days=30'));
-    assert.equal(body.total, 4, 'the 20-day-old one is in the last 30 days');
+    assert.equal(body.total, 5, 'the 9- and 20-day-old ones are in the last 30 days');
+    assert.deepEqual([body.previous, body.comparable], [null, false], 'no daily collection 31-60 days ago');
     ({ body } = await get('role=sre&days=7&limit=2&page=2'));
     assert.deepEqual([body.items.map((j) => j.title), body.pages], [['Systems Reliability Engineer II'], 2]);
+
+    // ServiceNow Openings (Hiring partners' count): ServiceNow in the title however it is spelled.
+    await Job.create([job(20, 'ServiceNow Developer', 2), job(21, 'Package Consultant-ServiceNow', 30), job(22, 'Snowflake Data Engineer', 3)]);
+    await NonFilteredJob.create([job(23, 'Service Now ITOM Admin', 4, { leftOutBy: 'big-company' })]);
+    ({ body } = await get('role=servicenow&days=90&limit=1'));
+    assert.equal(body.role.name, 'ServiceNow Openings');
+    assert.deepEqual([body.total, body.filtered, body.nonFiltered, body.items.length], [2, 2, 1, 1], 'not Snowflake; a page of one is enough for a count');
+    ({ body } = await get('role=servicenow&days=90&view=nonfiltered'));
+    assert.deepEqual(body.items.map((j) => j.title), ['Service Now ITOM Admin']);
+    ({ body } = await get('role=sre&days=7'));
+    assert.equal(body.total, 3, 'ServiceNow jobs are not SRE');
 
     assert.equal((await get('role=nope&days=7')).status, 400);
     assert.equal((await get('role=sre&days=7', 'expired')).status, 401);
