@@ -493,10 +493,22 @@ async function checkChartNumbers(view = '') {
 
   // Top companies and cities, experience levels, and each course's most requested skills.
   const insights = await get('insights?days=7');
-  for (const { name, count } of insights.companies) await same({ days: 7, company: name }, count, `company ${name}`);
-  for (const { name, count } of insights.cities) await same({ days: 7, city: name }, count, `city ${name}`);
+  // Each also split by course (the hover card): the parts add up, and each part is that course's jobs.
+  const sumOfParts = (byCourse) => Object.values(byCourse).reduce((n, v) => n + v, 0);
+  for (const { name, count, byCourse } of insights.companies) {
+    await same({ days: 7, company: name }, count, `company ${name}`);
+    assert.equal(sumOfParts(byCourse), count, `company ${name}: courses add up`);
+    for (const [course, n] of Object.entries(byCourse)) await same({ days: 7, company: name, course }, n, `company ${name} x ${course}`);
+  }
+  for (const { name, count, byCourse } of insights.cities) {
+    await same({ days: 7, city: name }, count, `city ${name}`);
+    assert.equal(sumOfParts(byCourse), count, `city ${name}: courses add up`);
+    for (const [course, n] of Object.entries(byCourse)) await same({ days: 7, city: name, course }, n, `city ${name} x ${course}`);
+  }
   for (const [band, count] of Object.entries(insights.experience).filter(([band]) => band !== 'null')) {
     await same({ days: 7, exp: band }, count, `${band} years`);
+    assert.equal(sumOfParts(insights.experienceByCourse[band]), count, `${band} years: courses add up`);
+    for (const [course, n] of Object.entries(insights.experienceByCourse[band])) await same({ days: 7, exp: band, course }, n, `${band} years x ${course}`);
   }
   for (const [course, skills] of Object.entries(insights.skills)) {
     for (const { name, count } of skills) await same({ days: 7, course, skill: name }, count, `${course}: ${name}`);

@@ -197,6 +197,11 @@ function jobFilter(query, { start, end }) {
 }
 
 const countBy = (rows) => Object.fromEntries(rows.map((r) => [r._id, r.count]));
+// Group jobs by a field, keeping each value's jobs per course: { _id, count, byCourse: [{ k: course, v: n }] }.
+const byCourseGroup = (field) => [
+  { $group: { _id: { value: field, course: '$course' }, count: { $sum: 1 } } },
+  { $group: { _id: '$_id.value', count: { $sum: '$count' }, byCourse: { $push: { k: '$_id.course', v: '$count' } } } },
+];
 
 // Platforms searched now, plus any switched off that still have jobs in the window
 // (so platform totals always add up to the overall total).
@@ -337,19 +342,15 @@ router.get('/insights', wrap(async (req, res) => {
     { $match: match },
     {
       $facet: {
+        // Each top company and city with its jobs per course too (shown when a bar is hovered).
         companies: [
           { $match: { company: { $nin: [null, ''] } } },
-          { $group: { _id: '$company', count: { $sum: 1 } } },
+          ...byCourseGroup('$company'),
           { $sort: { count: -1, _id: 1 } },
           { $limit: 10 },
         ],
-        cities: [
-          { $unwind: '$cities' },
-          { $group: { _id: '$cities', count: { $sum: 1 } } },
-          { $sort: { count: -1, _id: 1 } },
-          { $limit: 10 },
-        ],
-        experience: [{ $group: { _id: '$experienceBand', count: { $sum: 1 } } }],
+        cities: [{ $unwind: '$cities' }, ...byCourseGroup('$cities'), { $sort: { count: -1, _id: 1 } }, { $limit: 10 }],
+        experience: byCourseGroup('$experienceBand'),
         skills: [
           { $unwind: '$skills' },
           { $group: { _id: { course: '$course', skill: '$skills' }, count: { $sum: 1 } } },
@@ -365,7 +366,8 @@ router.get('/insights', wrap(async (req, res) => {
     const list = skillsByCourse[s._id.course];
     if (list && list.length < 8) list.push({ name: s._id.skill, count: s.count });
   }
-  const toList = (rows) => rows.map((r) => ({ name: r._id, count: r.count }));
+  const courseCounts = (r) => Object.fromEntries(r.byCourse.map(({ k, v }) => [k, v]));
+  const toList = (rows) => rows.map((r) => ({ name: r._id, count: r.count, byCourse: courseCounts(r) }));
   res.json({
     days,
     anchor: range.anchor,
@@ -375,6 +377,7 @@ router.get('/insights', wrap(async (req, res) => {
     companies: toList(facets.companies),
     cities: toList(facets.cities),
     experience: countBy(facets.experience),
+    experienceByCourse: Object.fromEntries(facets.experience.map((r) => [r._id, courseCounts(r)])),
     skills: skillsByCourse,
   });
 }));

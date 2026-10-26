@@ -13,6 +13,8 @@ import { reveal } from './privacy.js';
 
 const COURSE_IDS = COURSES.map((c) => c.id);
 const courseName = (id) => COURSES.find((c) => c.id === id)?.name ?? id ?? '';
+// { 'data-analyst': 3 } -> { 'Data Analyst': 3 }
+const byCourseName = (counts = {}) => Object.fromEntries(Object.entries(counts).map(([id, n]) => [courseName(id), n]));
 const split = (value) => String(value ?? '').split(/\s*,\s*/).filter(Boolean);
 const DAY_MS = 86_400_000;
 
@@ -283,8 +285,8 @@ const RUN = {
     return {
       period: periodWords(r),
       jobs: r.total,
-      topCompanies: r.companies,
-      topCities: r.cities,
+      topCompanies: r.companies.map((c) => ({ ...c, byCourse: byCourseName(c.byCourse) })),
+      topCities: r.cities.map((c) => ({ ...c, byCourse: byCourseName(c.byCourse) })),
       experience: r.experience,
       topSkills: Object.fromEntries(Object.entries(r.skills).map(([id, list]) => [courseName(id), list])),
     };
