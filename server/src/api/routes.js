@@ -13,6 +13,7 @@ import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
 import { MAX_STUDENTS, PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
 import { searchEverything } from './search.js';
+import { AllJobs } from './allJobs.js';
 import { ROLE_BOXES, roleTitleQuery } from '../config/roleBoxes.js';
 
 const router = express.Router();
@@ -31,10 +32,11 @@ const DAY_MS = 86_400_000;
 const IST_OFFSET_MS = 330 * 60_000;
 const IST = 'Asia/Kolkata';
 
-// Which jobs a request reads: the kept (filtered) jobs, or with ?view=nonfiltered the jobs the keep rules
-// leave out (NonFilteredJob). Every route that reads jobs uses this, so the dashboard's Filtered /
-// Non-filtered switch changes every number and list the same way.
-const jobsFor = (req) => (req.query.view === 'nonfiltered' ? NonFilteredJob : Job);
+// Which jobs a request reads: the kept (filtered) jobs; with ?view=nonfiltered the jobs the keep rules
+// leave out (NonFilteredJob); with ?view=all both together (allJobs.js). Every route that reads jobs uses
+// this, so the dashboard's Filtered / Non-filtered / All switch changes every number and list the same way.
+const viewOf = (req) => (req.query.view === 'nonfiltered' || req.query.view === 'all' ? req.query.view : 'filtered');
+const jobsFor = (req) => ({ filtered: Job, nonfiltered: NonFilteredJob, all: AllJobs })[viewOf(req)];
 
 const wrap = (handler) => (req, res, next) => handler(req, res).catch(next);
 const clampDays = (value, fallback, max) => Math.min(Math.max(Number.parseInt(value, 10) || fallback, 1), max);
@@ -596,9 +598,9 @@ router.get('/partners.csv', wrap(async (req, res) => {
 
 // ---------- One role's openings (the dashboard's "SRE Openings" box) ----------
 
-// The openings of one role (config/roleBoxes.js) found in the period, in the view's set (Filtered, or with
-// ?view=nonfiltered the Non-filtered jobs, each with its leftOutBy), newest first. ?role=sre, ?days= or
-// ?from=&to=, ?page=, ?limit= (at most 100). Also how many each set has. Signed in only.
+// The openings of one role (config/roleBoxes.js) found in the period, in the view's set (Filtered; with
+// ?view=nonfiltered the Non-filtered jobs, each with its leftOutBy; with ?view=all both), newest first.
+// ?role=sre, ?days= or ?from=&to=, ?page=, ?limit= (at most 100). Also how many each set has. Signed in only.
 router.get('/role-jobs', requirePermission('view'), wrap(async (req, res) => {
   const role = ROLE_BOXES.find((r) => r.id === req.query.role);
   if (!role) return res.status(400).json({ error: `role must be one of: ${ROLE_BOXES.map((r) => r.id).join(', ')}.` });
@@ -616,8 +618,8 @@ router.get('/role-jobs', requirePermission('view'), wrap(async (req, res) => {
     collectedEveryDay(prevStart, range.end),
   ]);
   const previous = comparable ? await J.countDocuments({ ...match, firstSeenAt: { $gte: prevStart, $lt: range.start } }) : null;
-  const view = J === NonFilteredJob ? 'nonfiltered' : 'filtered';
-  const total = view === 'nonfiltered' ? nonFiltered : filtered;
+  const view = viewOf(req);
+  const total = { filtered, nonfiltered: nonFiltered, all: filtered + nonFiltered }[view];
   res.json({
     role: { id: role.id, name: role.name },
     view,
@@ -1005,10 +1007,12 @@ router.get('/jobs.csv', wrap(async (req, res) => {
   const jobs = await J.find(jobFilter(req.query, range), JOB_FIELDS).sort(JOB_SORT).limit(10_000).lean();
   const courseName = Object.fromEntries(COURSES.map((c) => [c.id, c.name]));
   const platforms = await platformsInUse({ firstSeenAt: { $gte: range.start, $lt: range.end } }, J);
-  const nonFiltered = req.query.view === 'nonfiltered';
+  // Non-filtered and All say why each left-out job is left out (a kept job's cell is empty).
+  const view = viewOf(req);
+  const withReason = view !== 'filtered';
   const header = [
     'First seen (IST)', 'Posted (IST)', 'Course', 'Title', 'Company', 'Cities', 'Experience', 'Salary', 'Listed on',
-    'HR name', 'HR profile', 'Phone', 'Email', 'Assigned to', 'Remarks', ...(nonFiltered ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
+    'HR name', 'HR profile', 'Phone', 'Email', 'Assigned to', 'Remarks', ...(withReason ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
   ];
   const lines = jobs.map(jobRow).map((job) =>
     [
@@ -1027,14 +1031,14 @@ router.get('/jobs.csv', wrap(async (req, res) => {
       job.contact.email,
       job.contact.assignedTo.join('; '),
       job.contact.remarks,
-      ...(nonFiltered ? [LEFT_OUT_REASONS[job.leftOutBy] ?? ''] : []),
+      ...(withReason ? [LEFT_OUT_REASONS[job.leftOutBy] ?? ''] : []),
       ...platforms.map((p) => job.links?.[p] ?? ''),
     ]
       .map(csvCell)
       .join(','),
   );
   res.set('Content-Type', 'text/csv; charset=utf-8');
-  res.set('Content-Disposition', `attachment; filename="${nonFiltered ? 'non-filtered-' : ''}jobs-${range.custom ? (range.from === range.to ? range.from : `${range.from}-to-${range.to}`) : `${range.anchor}-${days}d`}.csv"`);
+  res.set('Content-Disposition', `attachment; filename="${{ nonfiltered: 'non-filtered-', all: 'all-' }[view] ?? ''}jobs-${range.custom ? (range.from === range.to ? range.from : `${range.from}-to-${range.to}`) : `${range.anchor}-${days}d`}.csv"`);
   res.send(`﻿${[header.join(','), ...lines].join('\r\n')}`);
 }));
 

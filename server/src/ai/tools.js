@@ -56,8 +56,8 @@ const PERIOD = {
 const VIEW = {
   view: {
     type: 'string',
-    enum: ['filtered', 'nonfiltered'],
-    description: `filtered (default): the kept jobs (${experienceRangeText()} years, no big IT services firms). nonfiltered: the jobs those rules leave out (fresher jobs too).`,
+    enum: ['filtered', 'nonfiltered', 'all'],
+    description: `filtered (default): the kept jobs (${experienceRangeText()} years, no big IT services firms). nonfiltered: the jobs those rules leave out (fresher jobs too). all: both together.`,
   },
 };
 const COURSE = { course: { type: 'string', enum: COURSE_IDS, description: `The course: ${COURSES.map((c) => `${c.id} = ${c.name}`).join(', ')}.` } };
@@ -70,7 +70,10 @@ function periodOf(args, ctx) {
   if (page.from) return { from: page.from, to: page.to || page.from };
   return { days: page.days || 1 };
 }
-const viewOf = (args, ctx) => ((args.view ?? ctx.context?.view) === 'nonfiltered' ? 'nonfiltered' : undefined);
+const viewOf = (args, ctx) => {
+  const view = args.view ?? ctx.context?.view;
+  return view === 'nonfiltered' || view === 'all' ? view : undefined;
+};
 const courseOf = (value) => {
   if (!value) return undefined;
   const found = COURSES.find((c) => c.id === value || c.name.toLowerCase() === String(value).toLowerCase());
@@ -331,7 +334,8 @@ const RUN = {
       withHrDetails: r.withContact,
       period: periodWords(r),
       view: view ?? 'filtered',
-      items: r.items.slice(0, 10).map((j) => ({ id: j._id, title: j.title, company: j.company || '', course: j.course, cities: shownCities(j.cities), set: view ?? 'filtered' })),
+      // Each job's own set (in the All view a left-out job is the one with a reason).
+      items: r.items.slice(0, 10).map((j) => ({ id: j._id, title: j.title, company: j.company || '', course: j.course, cities: shownCities(j.cities), set: (view === 'all' ? (j.leftOutBy ? 'nonfiltered' : 'filtered') : view) ?? 'filtered' })),
       links: Object.entries(counts)
         .filter(([, n]) => n > 0)
         .map(([id, n]) => ({ label: `${courseName(id)} · ${n}`, href: jobListHref(id, period, filters), view: view ?? 'filtered' })),

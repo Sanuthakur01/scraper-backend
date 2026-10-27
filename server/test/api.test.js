@@ -585,6 +585,93 @@ test('the Non-filtered view shows only the non-filtered jobs, and the Filtered v
   }
 });
 
+test('the All view shows the Filtered and Non-filtered jobs together: each number is the sum, each list holds both', async () => {
+  const get = async (path) => (await fetch(`${base}/${path}`)).json();
+  const now = Date.now();
+  const left = (n, extra) => ({
+    fingerprint: `all${n}`, title: `Data Engineer A${n}`, company: `Left Out A${n}`, course: 'data-engineering', cities: ['Nagpur'],
+    firstSeenAt: new Date(now - 2 * HOUR), lastSeenAt: new Date(now - 2 * HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'],
+    sourceKeys: [`ALL:${n}`], links: { Naukri: `https://example.com/all${n}` }, ...extra,
+  });
+  const docs = await NonFilteredJob.create([
+    left(1, { company: 'Infosys', leftOutBy: 'big-company', experienceMin: 3, experienceBand: '3', postedAt: new Date(now - 3 * HOUR) }),
+    left(2, { leftOutBy: 'experience', experienceMin: 0, experienceBand: 'fresher', skills: ['SQL'], course: 'data-analyst', cities: ['Pune'] }),
+    left(3, { leftOutBy: 'no-experience', experienceBand: 'unknown', course: 'data-analyst', primaryPlatform: 'Indeed', platforms: ['Indeed', 'Naukri'], links: { Indeed: 'https://example.com/a3' }, firstSeenAt: new Date(now - 30 * HOUR) }),
+    left(4, { leftOutBy: 'experience', experienceMin: 0, experienceBand: 'fresher', firstSeenAt: new Date(now - 5 * 24 * HOUR), manual: { phone: '97000 22222' } }),
+  ]);
+  const views = async (path) => {
+    const [f, nf, all] = await Promise.all(['', '&view=nonfiltered', '&view=all'].map((v) => get(`${path}${path.includes('?') ? '' : '?'}${v}`)));
+    return { f, nf, all };
+  };
+  const sumBy = (a = {}, b = {}) => Object.fromEntries([...new Set([...Object.keys(a), ...Object.keys(b)])].map((k) => [k, (a[k] ?? 0) + (b[k] ?? 0)]));
+  try {
+    let v = await views('summary?days=7');
+    assert.deepEqual(v.all.current, sumBy(v.f.current, v.nf.current), 'summary: each course');
+    assert.ok(v.nf.current['data-engineering'] > 0 && v.f.current['data-analyst'] > 0, 'both sets have jobs in the period');
+
+    v = await views('platforms?days=7');
+    const totals = (r) => Object.fromEntries(r.platforms.map((p) => [p.platform, p.total]));
+    assert.deepEqual(totals(v.all), sumBy(totals(v.f), totals(v.nf)), 'platforms: each site');
+    assert.equal(v.all.multiPlatform, v.f.multiPlatform + v.nf.multiPlatform);
+
+    v = await views('trends?days=30');
+    for (const point of v.all.series) {
+      const f = v.f.series.find((p) => p.day === point.day) ?? {};
+      const nf = v.nf.series.find((p) => p.day === point.day) ?? {};
+      for (const { id } of COURSES) assert.equal(point[id], (f[id] ?? 0) + (nf[id] ?? 0), `trends: ${point.day} ${id}`);
+    }
+
+    v = await views('insights?days=7');
+    assert.equal(v.all.total, v.f.total + v.nf.total, 'insights: total');
+    assert.deepEqual(v.all.experience, sumBy(v.f.experience, v.nf.experience), 'insights: experience levels');
+
+    v = await views('course/data-analyst?days=7');
+    assert.equal(v.all.total, v.f.total + v.nf.total, 'course page: total');
+    assert.equal(v.all.freshness.storedTotal, v.f.freshness.storedTotal + v.nf.freshness.storedTotal, 'course page: stored');
+
+    v = await views('meta');
+    assert.deepEqual(v.all.cities, [...new Set([...v.f.cities, ...v.nf.cities])].sort((a, b) => a.localeCompare(b)), 'meta: cities of both');
+    assert.ok(v.all.cities.includes('Nagpur') && v.all.cities.includes(v.f.cities[0]));
+
+    v = await views('partners');
+    assert.equal(v.all.jobs, v.f.jobs + v.nf.jobs, 'partners: the jobs looked at');
+
+    // The job list: both sets, one order (newest first, as each list), paged without gaps or repeats.
+    v = await views('jobs?days=30&limit=100');
+    assert.equal(v.all.total, v.f.total + v.nf.total, 'jobs: total');
+    assert.equal(v.all.withContact, v.f.withContact + v.nf.withContact, 'jobs: with HR details');
+    assert.deepEqual(new Set(v.all.items.map((j) => j._id)), new Set([...v.f.items, ...v.nf.items].map((j) => j._id)), 'jobs: every job of both');
+    const order = v.all.items.map((j) => [Date.parse(j.firstSeenAt), j.postedAt ? Date.parse(j.postedAt) : -Infinity, j._id]);
+    assert.ok(order.every((o, i) => i === 0 || order[i - 1][0] > o[0] || (order[i - 1][0] === o[0] && (order[i - 1][1] > o[1] || (order[i - 1][1] === o[1] && order[i - 1][2] < o[2])))), 'jobs: newest first');
+    assert.deepEqual(v.all.items.filter((j) => j.leftOutBy).map((j) => j._id).sort(), docs.map((d) => String(d._id)).sort(), 'the left-out ones say why');
+    const pages = await Promise.all([1, 2, 3].map((page) => get(`jobs?days=30&limit=2&page=${page}&view=all`)));
+    assert.deepEqual(pages.flatMap((p) => p.items.map((j) => j._id)), v.all.items.slice(0, 6).map((j) => j._id), 'jobs: pages in order');
+    for (const [filter, what] of [['age=day', 'how old'], ['q=Left%20Out', 'search words'], ['exp=fresher', 'experience'], ['city=Pune', 'city'], ['sites=2', 'on several sites'], ['hr=some', 'with HR details']]) {
+      v = await views(`jobs?days=30&limit=1&${filter}`);
+      assert.equal(v.all.total, v.f.total + v.nf.total, `jobs filtered by ${what}`);
+    }
+    for (const doc of [docs[1], await Job.findOne({ fingerprint: 'f1' }).lean()]) {
+      const one = await get(`jobs?id=${doc._id}&days=1&view=all`);
+      assert.deepEqual(one.items.map((j) => j._id), [String(doc._id)], 'one job by id, from either set');
+    }
+
+    const csv = async (view) => (await (await fetch(`${base}/jobs.csv?days=30${view}`)).text()).trim().split('\n').length - 1;
+    assert.equal(await csv('&view=all'), (await csv('')) + (await csv('&view=nonfiltered')), 'CSV: the rows of both');
+    const allCsv = await fetch(`${base}/jobs.csv?days=30&view=all`);
+    assert.match(allCsv.headers.get('content-disposition'), /filename="all-jobs-/);
+    assert.match(await allCsv.text(), /Left out because.*\r?\n[\s\S]*Large IT services firm/, 'CSV: why each left-out job is left out');
+
+    v = await views('role-jobs?role=sre&days=30');
+    assert.equal(v.all.view, 'all');
+    assert.equal(v.all.total, v.all.filtered + v.all.nonFiltered, 'a role box: both sets');
+
+    const checked = await checkChartNumbers('all');
+    assert.ok(checked >= 20, `checked ${checked} numbers`);
+  } finally {
+    await NonFilteredJob.deleteMany({ fingerprint: /^all/ });
+  }
+});
+
 test('a day without a collection run is never compared (it would look like a huge jump)', async () => {
   const DAY = 24 * HOUR;
   const IST = 330 * 60_000;
