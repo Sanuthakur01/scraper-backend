@@ -8,6 +8,7 @@ import { experienceRangeText } from '../config/filters.js';
 import { routeHandlers } from '../api/routes.js';
 import { contactView, findPhoneOwner, parseFollowUpInput, PHONE_EXISTS } from '../api/followUp.js';
 import { Job, NonFilteredJob } from '../models.js';
+import { shownCities } from '../normalize.js';
 import { contactKey, parseOutcomeInput, REMARKS, remarkLabel } from '../outcomes.js';
 import { reveal } from './privacy.js';
 
@@ -84,7 +85,7 @@ const jobBrief = (job) => ({
   title: job.title,
   company: job.company || '',
   course: courseName(job.course),
-  cities: job.cities ?? [],
+  cities: shownCities(job.cities),
   experience: job.experienceMin == null ? job.experienceText || 'not stated' : job.experienceMax != null ? `${job.experienceMin}-${job.experienceMax} yrs` : `${job.experienceMin}+ yrs`,
   salary: job.salaryText || '',
   sites: job.platforms,
@@ -305,7 +306,6 @@ const RUN = {
       postAgeWhenFound: r.postingAge,
       experience: r.experience,
       salaryShown: r.salaryShown,
-      remote: r.remote,
       topCompanies: r.companies,
       topCities: r.cities,
       topSkills: r.skills,
@@ -331,7 +331,7 @@ const RUN = {
       withHrDetails: r.withContact,
       period: periodWords(r),
       view: view ?? 'filtered',
-      items: r.items.slice(0, 10).map((j) => ({ id: j._id, title: j.title, company: j.company || '', course: j.course, cities: j.cities ?? [], set: view ?? 'filtered' })),
+      items: r.items.slice(0, 10).map((j) => ({ id: j._id, title: j.title, company: j.company || '', course: j.course, cities: shownCities(j.cities), set: view ?? 'filtered' })),
       links: Object.entries(counts)
         .filter(([, n]) => n > 0)
         .map(([id, n]) => ({ label: `${courseName(id)} · ${n}`, href: jobListHref(id, period, filters), view: view ?? 'filtered' })),
@@ -410,7 +410,7 @@ const RUN = {
     return {
       partners: list.length,
       withHrContact: list.filter((p) => p.phones.length || p.emails.length).length,
-      top: list.slice(0, limit).map((p) => ({ company: p.name, openings: p.openings, courses: Object.fromEntries(Object.entries(p.courses).map(([id, n]) => [courseName(id), n])), cities: p.cities, lastPosted: p.lastPosted, phones: p.phones, emails: p.emails })),
+      top: list.slice(0, limit).map((p) => ({ company: p.name, openings: p.openings, courses: Object.fromEntries(Object.entries(p.courses).map(([id, n]) => [courseName(id), n])), cities: shownCities(p.cities), lastPosted: p.lastPosted, phones: p.phones, emails: p.emails })),
     };
   },
 

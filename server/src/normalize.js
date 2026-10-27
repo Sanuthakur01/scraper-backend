@@ -78,6 +78,12 @@ const INDIA_STATES = [
 
 const REMOTE_WORDS = ['remote', 'work from home', 'wfh', 'anywhere in india'];
 
+// Cities the dashboard doesn't show (user request, 27 Oct 2026). A remote job that names no city is
+// stored with the city "Remote" (parseLocation); the stored jobs keep it, only city lists and job
+// details leave it out.
+export const HIDDEN_CITIES = ['Remote'];
+export const shownCities = (cities) => (cities ?? []).filter((city) => !HIDDEN_CITIES.includes(city));
+
 // Returns every known city named in the text, in the order they appear.
 // Unknown places keep their first comma-separated part, e.g. "Hosur, Tamil Nadu" -> "Hosur".
 export function parseLocation(locationText) {

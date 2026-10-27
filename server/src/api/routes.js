@@ -8,7 +8,7 @@ import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob } from '../
 import { contactChanges, overallAction } from '../activity.js';
 import { contactKey, outcomeChanges, parseOutcomeInput } from '../outcomes.js';
 import { requirePermission } from '../auth.js';
-import { SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
+import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
 import { MAX_STUDENTS, PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
@@ -92,10 +92,23 @@ async function collectedEveryDay(from, to) {
   return true;
 }
 
-// Days are IST calendar days ending on the day of the latest collection run, so the dashboard
+// The latest finished run of every course that searched the newest postings: a daily run or a short
+// catch-up. A backfill (e.g. 30 days) or a run of only some courses doesn't count: run after midnight,
+// it made "the latest day" a day the daily run hadn't collected yet (27 Oct 2026: an overnight backfill
+// left it showing 7 kept and 0 non-filtered jobs). With no such run, the latest run of any kind.
+const latestDailyRun = async () =>
+  (await CollectorRun.findOne({
+    status: { $in: ['success', 'partial'] },
+    'onlyCourses.0': { $exists: false },
+    $or: [{ lookbackDays: { $exists: false } }, { lookbackDays: { $lte: CATCH_UP_DAYS } }],
+  })
+    .sort({ startedAt: -1 })
+    .lean()) ?? latestRun();
+
+// Days are IST calendar days ending on the day of the latest daily run, so the dashboard
 // shows the latest daily update even before today's run has happened.
 async function dayRange(days) {
-  const run = await latestRun();
+  const run = await latestDailyRun();
   const anchor = istDate(run?.startedAt ?? new Date());
   const end = new Date(istDayStart(anchor).getTime() + DAY_MS);
   const start = new Date(end.getTime() - days * DAY_MS);
@@ -150,7 +163,7 @@ const MAX_RANGE_DAYS = 366;
 async function periodRange(query, fallbackDays, maxDays = 90) {
   const custom = customRange(query);
   if (custom) {
-    const run = await latestRun();
+    const run = await latestDailyRun();
     return { ...custom, anchor: istDate(run?.startedAt ?? new Date()), run };
   }
   const days = clampDays(query.days, fallbackDays, maxDays);
@@ -250,6 +263,7 @@ router.get('/meta', wrap(async (req, res) => {
     J.aggregate([
       { $match: { firstSeenAt: { $gte: since } } },
       { $unwind: '$cities' },
+      { $match: { cities: { $nin: HIDDEN_CITIES } } },
       { $group: { _id: '$cities', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 60 },
@@ -364,7 +378,13 @@ router.get('/insights', wrap(async (req, res) => {
           { $sort: { count: -1, _id: 1 } },
           { $limit: 10 },
         ],
-        cities: [{ $unwind: '$cities' }, ...byCourseGroup('$cities'), { $sort: { count: -1, _id: 1 } }, { $limit: 10 }],
+        cities: [
+          { $unwind: '$cities' },
+          { $match: { cities: { $nin: HIDDEN_CITIES } } },
+          ...byCourseGroup('$cities'),
+          { $sort: { count: -1, _id: 1 } },
+          { $limit: 10 },
+        ],
         experience: byCourseGroup('$experienceBand'),
         skills: [
           { $unwind: '$skills' },
@@ -409,6 +429,7 @@ router.get('/course/:id', wrap(async (req, res) => {
   const prevStart = new Date(range.start.getTime() - days * DAY_MS);
   const top = (field, limit = 10) => [
     ...(field === 'cities' || field === 'skills' ? [{ $unwind: `$${field}` }] : [{ $match: { [field]: { $nin: [null, ''] } } }]),
+    ...(field === 'cities' ? [{ $match: { cities: { $nin: HIDDEN_CITIES } } }] : []),
     { $group: { _id: `$${field}`, count: { $sum: 1 } } },
     { $sort: { count: -1, _id: 1 } },
     { $limit: limit },
@@ -425,7 +446,6 @@ router.get('/course/:id', wrap(async (req, res) => {
           postingAge: [{ $group: { _id: POSTING_AGE, count: { $sum: 1 } } }],
           experience: [{ $group: { _id: '$experienceBand', count: { $sum: 1 } } }],
           salaryShown: [{ $match: SALARY_SHOWN }, { $count: 'n' }],
-          remote: [{ $match: { $or: [{ isRemote: true }, { cities: 'Remote' }] } }, { $count: 'n' }],
           foundRange: [{ $group: { _id: null, first: { $min: '$firstSeenAt' }, last: { $max: '$firstSeenAt' } } }],
           companies: top('company'),
           cities: top('cities'),
@@ -461,7 +481,6 @@ router.get('/course/:id', wrap(async (req, res) => {
     postingAge: countBy(facets.postingAge),
     experience,
     salaryShown: n(facets.salaryShown),
-    remote: n(facets.remote),
     companies: toList(facets.companies),
     cities: toList(facets.cities),
     skills: toList(facets.skills),
@@ -660,7 +679,7 @@ router.get('/search', requirePermission('view'), wrap(async (req, res) => {
 // ---------- Job lists ----------
 
 const JOB_FIELDS = {
-  title: 1, company: 1, course: 1, cities: 1, isRemote: 1, experienceMin: 1, experienceMax: 1,
+  title: 1, company: 1, course: 1, cities: 1, experienceMin: 1, experienceMax: 1,
   experienceText: 1, experienceBand: 1, salaryText: 1, skills: 1, postedAt: 1, firstSeenAt: 1,
   primaryPlatform: 1, platforms: 1, links: 1, foundPhones: 1, foundEmails: 1, manual: 1, leftOutBy: 1,
 };

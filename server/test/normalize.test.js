@@ -12,6 +12,7 @@ import {
   parseExperience,
   parseLocation,
   phoneKey,
+  shownCities,
   titleKey,
 } from '../src/normalize.js';
 
@@ -86,6 +87,9 @@ test('locations are normalised and grouped', () => {
   assert.deepEqual(parseLocation('India').cities, ['India (city not stated)']);
   assert.deepEqual(parseLocation('Hyderābād').cities, ['Hyderabad'], 'accented spelling from Glassdoor');
   assert.equal(parseLocation('Work from home').isRemote, true);
+  assert.deepEqual(shownCities(['Pune', 'Remote']), ['Pune'], 'Remote is stored but not shown');
+  assert.deepEqual(shownCities(['Remote']), []);
+  assert.deepEqual(shownCities(undefined), []);
 });
 
 test('India check', () => {

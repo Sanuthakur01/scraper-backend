@@ -51,7 +51,7 @@ before(async () => {
   await Job.create([
     job(1, { primaryPlatform: 'LinkedIn', platforms: ['LinkedIn'], postedAt: new Date(now - 3 * HOUR), experienceMin: 2, experienceBand: '2', salaryText: '₹5L' }),
     job(2, { primaryPlatform: 'Naukri', platforms: ['Naukri', 'Indeed'], postedAt: new Date(now - 50 * HOUR), experienceMin: 4, experienceBand: '4', salaryText: 'Not Disclosed', foundPhones: ['+91 98450 12345'], foundEmails: ['careers@company2.in'] }),
-    job(3, { primaryPlatform: 'Naukri', platforms: ['Naukri'], postedAt: null, experienceMin: 2, experienceBand: '2', cities: ['Remote'], isRemote: true }),
+    job(3, { primaryPlatform: 'Naukri', platforms: ['Naukri'], postedAt: null, experienceMin: 2, experienceBand: '2', cities: ['India (city not stated)'], isRemote: true }),
     job(4, { course: 'data-science', primaryPlatform: 'Indeed', platforms: ['Indeed'], postedAt: new Date(now - 2 * HOUR) }),
   ]);
   server = createApp({ identify: fakeIdentify }).listen(0);
@@ -81,7 +81,6 @@ test('the course page total equals the dashboard tile, and every breakdown adds 
   assert.equal(course.multiPlatform, 1);
   assert.deepEqual(course.experience, { 2: 2, 4: 1 }, 'jobs per year of experience asked');
   assert.equal(course.salaryShown, 1, '"Not Disclosed" is not a salary');
-  assert.equal(course.remote, 1);
   assert.equal(course.freshness.storedTotal, 3);
 });
 
@@ -618,6 +617,29 @@ test('a day without a collection run is never compared (it would look like a hug
   } finally {
     await CollectorRun.deleteMany({ startedAt: { $gte: new Date(todayStart) }, lookbackDays: { $in: [2, 30] } });
     await CollectorRun.insertMany(runs);
+  }
+});
+
+test('the latest day is the latest daily run\'s: a backfill or a run of some courses after it does not move it', async () => {
+  const DAY = 24 * HOUR;
+  const anchor = async () => (await (await fetch(`${base}/summary?days=1`)).json()).anchor;
+  const custom = async (day) => (await (await fetch(`${base}/summary?from=${day}&to=${day}`)).json()).anchor;
+  const before = await anchor();
+  const later = new Date(Date.now() + DAY); // the IST day after the daily run
+  const laterDay = new Date(later.getTime() + 330 * 60_000).toISOString().slice(0, 10);
+  const run = (extra) => CollectorRun.create({ startedAt: later, finishedAt: later, status: 'success', ...extra });
+  try {
+    await run({ lookbackDays: 30 });
+    await run({ lookbackDays: 2, onlyCourses: ['production-support'] });
+    await run({ lookbackDays: 30, onlyCourses: ['data-analyst'] });
+    assert.equal(await anchor(), before, 'backfills and one-course runs leave it');
+    assert.equal(await custom(before), before, 'the same for a chosen day');
+    await CollectorRun.create({ startedAt: later, finishedAt: later, status: 'failed', lookbackDays: 1 });
+    assert.equal(await anchor(), before, 'a failed run leaves it');
+    await run({ lookbackDays: 2 });
+    assert.equal(await anchor(), laterDay, 'a short catch-up of every course moves it');
+  } finally {
+    await CollectorRun.deleteMany({ startedAt: later });
   }
 });
 
@@ -1178,5 +1200,31 @@ test('SRE Openings: SRE jobs of the period in the view\'s set (Filtered or Non-f
   } finally {
     await Job.deleteMany({ fingerprint: /^sre/ });
     await NonFilteredJob.deleteMany({ fingerprint: /^sre/ });
+  }
+});
+
+test('"Remote" is never shown as a city (top cities, the city list, course pages); the stored jobs keep it', async () => {
+  const now = Date.now();
+  const remote = (n, cities) => ({
+    fingerprint: `remote${n}`, title: `Data Analyst R${n}`, company: `Remote Co ${n}`, course: 'data-analyst', cities, isRemote: true,
+    firstSeenAt: new Date(now - HOUR), lastSeenAt: new Date(now - HOUR), primaryPlatform: 'Indeed', platforms: ['Indeed'], sourceKeys: [`R:${n}`],
+  });
+  // Enough remote jobs to top the city ranking if it were counted.
+  await Job.create([...Array.from({ length: 6 }, (_, i) => remote(i, ['Remote'])), remote(9, ['Jaipur', 'Remote'])]);
+  await NonFilteredJob.create(remote(10, ['Remote']));
+  const get = async (path) => (await fetch(`${base}/${path}`)).json();
+  try {
+    for (const view of ['filtered', 'nonfiltered']) {
+      const insights = await get(`insights?days=1&view=${view}`);
+      assert.ok(!insights.cities.some((c) => c.name === 'Remote'), `top cities (${view}): ${JSON.stringify(insights.cities)}`);
+      assert.ok(!(await get(`meta?view=${view}`)).cities.includes('Remote'), `the city list (${view})`);
+      assert.ok(!(await get(`course/data-analyst?days=1&view=${view}`)).cities.some((c) => c.name === 'Remote'), `course page (${view})`);
+    }
+    assert.ok((await get('insights?days=1')).cities.some((c) => c.name === 'Jaipur'), 'the other cities of a remote job still count');
+    assert.equal(await Job.countDocuments({ cities: 'Remote' }), 7, 'stored jobs are unchanged');
+    assert.equal(await NonFilteredJob.countDocuments({ cities: 'Remote' }), 1);
+  } finally {
+    await Job.deleteMany({ fingerprint: /^remote/ });
+    await NonFilteredJob.deleteMany({ fingerprint: /^remote/ });
   }
 });
