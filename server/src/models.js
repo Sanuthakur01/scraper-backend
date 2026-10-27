@@ -181,7 +181,9 @@ const changeSchema = new mongoose.Schema(
     after: [String],
     added: [String], // in a list: values that are new …
     removed: [String], // … and values that are gone
-    contact: { type: new mongoose.Schema({ field: String, value: String }, { _id: false }), default: undefined }, // contactStudent / contactRemark: which number or email
+    // contactStudent / contactRemark: which number or email; for contactRemark also whose call (student; '' or
+    // missing: a remark made before anyone was given it, or from before a number could go to several students)
+    contact: { type: new mongoose.Schema({ field: String, value: String, student: String }, { _id: false }), default: undefined },
   },
   { _id: false },
 );
@@ -215,9 +217,11 @@ activitySchema.index({ 'actor.email': 1, at: -1 });
 
 export const Activity = mongoose.model('Activity', activitySchema);
 
-// The performance report's follow-up of one HR phone number or email of a job (src/outcomes.js): the
-// student it was given to and how it went. One per job and number/email (key: bare digits, or the
-// address in lower case); kept apart from the job's typed-in details, so editing those never touches it.
+// The follow-up of one HR phone number or email of a job given to one student (src/outcomes.js): the student
+// and how their call went. A number can go to several students, each with a remark of their own: one per job,
+// number/email (key: bare digits, or the address in lower case) and student (the same name in any case is the
+// same student); student '' (or missing) holds a remark made before anyone was given it. Kept apart from the
+// job's typed-in details, so editing those never touches it.
 const contactOutcomeSchema = new mongoose.Schema(
   {
     job: { type: mongoose.Schema.Types.ObjectId, required: true },
@@ -225,14 +229,15 @@ const contactOutcomeSchema = new mongoose.Schema(
     key: { type: String, required: true },
     value: String, // as written
     student: String,
-    status: String, // dnp | wrong | not-person | cv-shared | no-openings | other (outcomes.js REMARKS)
+    status: String, // dnp | busy | switched-off | wrong | not-person | cv-shared | no-openings | other (outcomes.js REMARKS)
     note: String, // the words of an "Others" remark
     updatedAt: Date,
     updatedBy: { email: String, name: String },
   },
   { versionKey: false },
 );
-contactOutcomeSchema.index({ job: 1, field: 1, key: 1 }, { unique: true });
+export const STUDENT_COLLATION = { locale: 'en', strength: 2 }; // "Riya" and "riya" are one student
+contactOutcomeSchema.index({ job: 1, field: 1, key: 1, student: 1 }, { unique: true, collation: STUDENT_COLLATION });
 
 export const ContactOutcome = mongoose.model('ContactOutcome', contactOutcomeSchema);
 

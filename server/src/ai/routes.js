@@ -18,7 +18,7 @@ import { AiBriefing, AiUsage, Chat } from '../models.js';
 import { AiError } from './openai.js';
 import { runChat } from './chat.js';
 import { BRIEFING_REQUEST } from './prompt.js';
-import { callRoute, doAction } from './tools.js';
+import { callRoute, doAction, needsRemark } from './tools.js';
 import { hideContacts, reveal } from './privacy.js';
 
 const router = express.Router();
@@ -222,13 +222,13 @@ router.get('/chat/reminders', requirePermission('view'), wrap(async (req, res) =
     const key = `${row.job.id}|${row.field}|${row.key}`;
     return seen.has(key) ? false : seen.add(key);
   });
-  const stale = contacts.filter((row) => !row.outcome?.status && Date.now() - Date.parse(row.at) >= 3 * DAY_MS).length;
-  const unassigned = contacts.filter((row) => !row.outcome?.student).length;
+  const stale = contacts.filter((row) => needsRemark(row) && Date.now() - Date.parse(row.at) >= 3 * DAY_MS).length;
+  const unassigned = contacts.filter((row) => !row.outcomes.some((o) => o.student)).length;
   const noDetails = jobsToday.total - jobsToday.withContact;
   const failed = meta.lastRun?.failedSearches?.length ?? 0;
   const items = [
     stale && { id: 'stale', text: `${stale} HR ${stale === 1 ? 'number or email has' : 'numbers and emails have'} had no remark for 3+ days`, href: '/performance?days=30&show=contacts&filter=no-remark', ask: 'Which HR numbers and emails have had no remark for 3 or more days?' },
-    unassigned && { id: 'unassigned', text: `${unassigned} HR ${unassigned === 1 ? 'contact isn’t' : 'contacts aren’t'} given to a student yet`, href: '/performance?days=30&show=contacts&filter=unassigned', ask: "Which HR numbers and emails aren't given to a student yet?" },
+    unassigned && { id: 'unassigned', text: `${unassigned} HR ${unassigned === 1 ? 'contact isn’t' : 'contacts aren’t'} given to a student yet`, href: '/assign?days=30', ask: "Which HR numbers and emails aren't given to a student yet?" },
     noDetails > 0 && { id: 'no-details', text: `${noDetails} of the latest day's ${jobsToday.total} new jobs ${noDetails === 1 ? 'has' : 'have'} no HR details yet`, ask: "Which of the latest day's new jobs have no HR details yet?" },
     failed && { id: 'collection', text: `The last collection had ${failed} failed ${failed === 1 ? 'search' : 'searches'}`, ask: 'Did the last collection work? What failed?' },
   ].filter(Boolean);

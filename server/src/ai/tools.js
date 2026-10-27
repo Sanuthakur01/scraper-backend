@@ -7,10 +7,14 @@ import { COURSES } from '../config/courses.js';
 import { experienceRangeText } from '../config/filters.js';
 import { routeHandlers } from '../api/routes.js';
 import { contactView, findPhoneOwner, parseFollowUpInput, PHONE_EXISTS } from '../api/followUp.js';
-import { Job, NonFilteredJob } from '../models.js';
+import { ContactOutcome, Job, NonFilteredJob } from '../models.js';
 import { shownCities } from '../normalize.js';
 import { contactKey, parseOutcomeInput, REMARKS, remarkLabel } from '../outcomes.js';
 import { reveal } from './privacy.js';
+
+// A number with no remark at all, or one of whose students hasn't said how their call went (the report's
+// "No remark yet").
+export const needsRemark = (row) => !row.outcomes.some((o) => o.status) || row.outcomes.some((o) => o.student && !o.status);
 
 const COURSE_IDS = COURSES.map((c) => c.id);
 const courseName = (id) => COURSES.find((c) => c.id === id)?.name ?? id ?? '';
@@ -219,11 +223,12 @@ export const TOOLS = [
   ),
   tool(
     'propose_follow_up',
-    "Propose a follow-up for one of a job's HR numbers or emails: the student it is given to and/or its remark. Nothing is saved until the person clicks Confirm on the card.",
+    "Propose a follow-up for one of a job's HR numbers or emails: give it to a student (a number can go to several students), take it back from one, or the remark of a student's call (each student's call has its own). Nothing is saved until the person clicks Confirm on the card.",
     {
       job_id: { type: 'string' },
       contact: { type: 'string', description: 'The number or email, as its stand-in, e.g. [phone 2].' },
-      student: { type: 'string', description: "The student's name ('' to take it off)." },
+      student: { type: 'string', description: "The student's name: given the number, or whose call the remark is about ('' with a remark: the number's own, while no student has it)." },
+      take_back: { type: 'boolean', description: 'true: take the number back from this student (their remark goes with it).' },
       remark: { type: 'string', enum: ['', ...Object.keys(REMARKS)], description: `${Object.entries(REMARKS).map(([id, label]) => `${id} = ${label}`).join('; ')}; '' to clear.` },
       note: { type: 'string', description: 'The words of an "other" remark.' },
     },
@@ -347,7 +352,7 @@ const RUN = {
     const r = await callRoute('GET', '/jobs', { query: { id: args.job_id, days: 1 } });
     const job = r.items[0] ?? (await callRoute('GET', '/jobs', { query: { id: args.job_id, days: 1, view: 'nonfiltered' } })).items[0];
     if (!job) throw new Error('That job is no longer stored.');
-    const outcomes = (await callRoute('GET', '/performance', { query: { days: 366 } })).rows.filter((row) => String(row.job.id) === String(job._id) && row.outcome);
+    const outcomes = (await callRoute('GET', '/performance', { query: { days: 366 } })).rows.filter((row) => String(row.job.id) === String(job._id) && row.outcomes.length);
     return {
       ...jobBrief(job),
       skills: job.skills ?? [],
@@ -363,7 +368,7 @@ const RUN = {
         note: job.contact.remarks,
         lastUpdated: job.contact.updatedAt,
       },
-      followUps: outcomes.map((o) => ({ contact: o.value, student: o.outcome.student, remark: remarkLabel(o.field, o.outcome.status, o.outcome.note) })),
+      followUps: outcomes.flatMap((row) => row.outcomes.map((o) => ({ contact: row.value, student: o.student, remark: remarkLabel(row.field, o.status, o.note) }))),
     };
   },
 
@@ -429,20 +434,20 @@ const RUN = {
       const p = people.get(row.actor.email) ?? { person: row.actor.name || row.actor.email, phones: 0, emails: 0, jobs: new Set(), givenToStudent: 0, withRemark: 0 };
       p[row.field === 'phone' ? 'phones' : 'emails']++;
       p.jobs.add(String(row.job.id));
-      if (row.outcome?.student) p.givenToStudent++;
-      if (row.outcome?.status) p.withRemark++;
+      if (row.outcomes.some((o) => o.student)) p.givenToStudent++;
+      if (row.outcomes.some((o) => o.status)) p.withRemark++;
       people.set(row.actor.email, p);
     }
     const byRemark = {};
-    for (const row of rows) if (row.outcome?.status) byRemark[REMARKS[row.outcome.status]] = (byRemark[REMARKS[row.outcome.status]] ?? 0) + 1;
+    for (const row of rows) for (const o of row.outcomes) if (o.status) byRemark[REMARKS[o.status]] = (byRemark[REMARKS[o.status]] ?? 0) + 1;
     return {
       period: { from: r.from, to: r.to },
       countingSince: r.since,
       contactDetailsAdded: rows.length,
       people: [...people.values()].map((p) => ({ ...p, total: p.phones + p.emails, jobs: p.jobs.size })).sort((a, b) => b.total - a.total),
       remarks: byRemark,
-      withoutRemark: rows.filter((row) => !row.outcome?.status).length,
-      notGivenToStudent: rows.filter((row) => !row.outcome?.student).length,
+      withoutRemark: rows.filter((row) => needsRemark(row)).length,
+      notGivenToStudent: rows.filter((row) => !row.outcomes.some((o) => o.student)).length,
     };
   },
 
@@ -461,9 +466,9 @@ const RUN = {
       if (course && row.job.course !== course) return false;
       if (person && !`${row.actor.name} ${row.actor.email}`.toLowerCase().includes(person)) return false;
       if (older && Date.now() - Date.parse(row.at) < older * DAY_MS) return false;
-      if (status === 'no-remark') return !row.outcome?.status;
-      if (status === 'unassigned') return !row.outcome?.student;
-      if (status !== 'all') return row.outcome?.status === status;
+      if (status === 'no-remark') return needsRemark(row);
+      if (status === 'unassigned') return !row.outcomes.some((o) => o.student);
+      if (status !== 'all') return row.outcomes.some((o) => o.status === status);
       return true;
     });
     const limit = Math.min(Math.max(Number(args.limit) || 15, 1), 30);
@@ -474,8 +479,11 @@ const RUN = {
       course: row.job.course,
       field: row.field,
       contact: row.value,
-      student: row.outcome?.student ?? '',
-      remark: row.outcome?.status ? remarkLabel(row.field, row.outcome.status, row.outcome.note) : '',
+      student: row.outcomes.map((o) => o.student).filter(Boolean).join(', '),
+      remark: row.outcomes
+        .filter((o) => o.status)
+        .map((o) => `${row.outcomes.length > 1 && o.student ? `${o.student}: ` : ''}${remarkLabel(row.field, o.status, o.note)}`)
+        .join('; '),
       addedBy: row.actor.name || row.actor.email,
       addedAt: row.at,
     }));
@@ -543,14 +551,19 @@ const RUN = {
     const view = contactView(job);
     const has = (field === 'phone' ? split(view.phone) : split(view.email)).some((v) => contactKey(field, v) === contactKey(field, value));
     if (!has) return { error: `That ${field === 'phone' ? 'number' : 'email'} isn't one of this job's HR contacts.` };
-    const body = { job: String(job._id), field, value };
-    if (args.student !== undefined) body.student = reveal(String(args.student), ctx.secrets);
-    if (args.remark !== undefined) Object.assign(body, { status: args.remark, note: args.note ?? '' });
+    const student = args.student === undefined ? '' : reveal(String(args.student), ctx.secrets).trim();
+    const body = { job: String(job._id), field, value, student };
+    if (args.take_back) body.remove = true;
+    else if (args.remark !== undefined) Object.assign(body, { status: args.remark, note: args.note ?? '' });
+    else body.add = true;
     const parsed = parseOutcomeInput(body);
     if (parsed.error) return { error: parsed.error };
+    // Whether the student has it already, for the words.
+    const theirs = student && (await ContactOutcome.exists({ job: job._id, field, key: contactKey(field, value), student: new RegExp(`^${student.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }));
     const parts = [
-      'student' in body && (body.student ? `give it to ${body.student}` : 'take it off its student'),
-      'status' in body && (body.status ? `remark "${remarkLabel(field, body.status, parsed.value.note)}"` : 'clear its remark'),
+      body.remove && `take it back from ${student}`,
+      !body.remove && student && !theirs && `give it to ${student}`,
+      'status' in body && (body.status ? `remark "${remarkLabel(field, body.status, parsed.value.note)}"${student && theirs ? ` for ${student}'s call` : ''}` : `clear ${student ? `${student}'s` : 'its'} remark`),
     ].filter(Boolean);
     const summary = `${value} (${job.title}${job.company ? ` at ${job.company}` : ''}): ${parts.join('; ')}`;
     ctx.actions.push({ type: 'set-follow-up', summary, payload: body });

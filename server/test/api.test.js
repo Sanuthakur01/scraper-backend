@@ -10,6 +10,7 @@ import { connectDb, disconnectDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
 import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob } from '../src/models.js';
 import { parseFollowUpInput } from '../src/api/followUp.js';
+import { REMARKS, remarkLabel, remarkOf } from '../src/outcomes.js';
 import { COURSES } from '../src/config/courses.js';
 import { SKILL_NAMES } from '../src/normalize.js';
 import { AuthError, createClerkIdentify } from '../src/auth.js';
@@ -730,6 +731,35 @@ test('the latest day is the latest daily run\'s: a backfill or a run of some cou
   }
 });
 
+test('the summary says how many of the period\'s jobs have HR details: each number is the job list\'s ?hr=some, the rest its ?hr=none', async () => {
+  const get = async (path) => (await fetch(`${base}/${path}`)).json();
+  const now = Date.now();
+  const left = (n, extra) => ({
+    fingerprint: `hrsum${n}`, title: `Data Analyst H${n}`, company: `HR Sum ${n}`, course: 'data-analyst', cities: ['Pune'], leftOutBy: 'experience',
+    firstSeenAt: new Date(now - 2 * HOUR), lastSeenAt: new Date(now - 2 * HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: [`HS:${n}`], ...extra,
+  });
+  await NonFilteredJob.create([left(1, { manual: { remarks: 'Called' } }), left(2, { foundEmails: ['hr@example.com'] }), left(3, {})]);
+  try {
+    for (const view of ['', '&view=nonfiltered', '&view=all']) {
+      const summary = await get(`summary?days=7${view}`);
+      assert.ok(summary.withHrDetails && typeof summary.withHrDetails === 'object', `withHrDetails is sent${view}`);
+      for (const { id } of COURSES) {
+        const total = summary.current[id] ?? 0;
+        const withHr = summary.withHrDetails[id] ?? 0;
+        assert.ok(withHr <= total, `${id}${view}: no more than its jobs`);
+        assert.equal((await get(`jobs?days=7&limit=1&course=${id}&hr=some${view}`)).total, withHr, `${id}${view}: with HR details`);
+        assert.equal((await get(`jobs?days=7&limit=1&course=${id}&hr=none${view}`)).total, total - withHr, `${id}${view}: without`);
+      }
+    }
+    const [f, nf, all] = await Promise.all(['', '&view=nonfiltered', '&view=all'].map((v) => get(`summary?days=7${v}`)));
+    assert.equal(nf.withHrDetails['data-analyst'], 2, 'a note typed in, or an email found in the post, counts; nothing does not');
+    assert.ok(f.withHrDetails['data-analyst'] > 0, 'the Filtered set has some too (a phone found in a post)');
+    assert.equal(all.withHrDetails['data-analyst'], f.withHrDetails['data-analyst'] + nf.withHrDetails['data-analyst'], 'All: both sets');
+  } finally {
+    await NonFilteredJob.deleteMany({ fingerprint: /^hrsum/ });
+  }
+});
+
 test('the job list says how many of its jobs have an HR contact', async () => {
   const now = Date.now();
   const job = await Job.create({
@@ -1053,7 +1083,7 @@ test('performance report: each phone number and email a person added, once, with
   assert.equal((await get('days=1', 'STUDENT:x@example.com')).status, 403);
 });
 
-test('follow-up of each number/email: a student and a remark, saved one at a time, on the job too, recorded, shown in the report', async () => {
+test('follow-up of each number/email: given to several students, each call with its own remark; on the job too, recorded, shown in the report', async () => {
   const job4 = await Job.findOne({ fingerprint: 'f4' }).lean();
   await putAs(job4._id, empty);
   assert.equal((await putAs(job4._id, { ...empty, phone: ['93456 70041'], email: ['hr@zeta.in'] }, 'RESEARCH_TEAM:asha@example.com')).status, 200);
@@ -1066,88 +1096,128 @@ test('follow-up of each number/email: a student and a remark, saved one at a tim
   const email = { job: String(job4._id), field: 'email', value: 'hr@zeta.in' };
   const latest = async () => (await Activity.find().sort({ at: -1, _id: -1 }).limit(1).lean())[0];
   const students = async () => (await Job.findById(job4._id).lean()).manual?.assignedTo ?? [];
+  const followUps = (res) => res.body.outcomes.map((o) => [o.student, o.status, o.note]);
 
-  // A student: saved, and put on the job's "Assigned to" list; recorded under the caller's email.
-  let res = await put({ ...phone, student: 'Kavya Rao' });
+  // Given to a student: saved, and on the job's "Assigned to" list; recorded under the caller's email.
+  let res = await put({ ...phone, student: 'Kavya Rao', add: true });
   assert.equal(res.status, 200);
-  assert.deepEqual([res.body.outcome.student, res.body.outcome.status, res.body.assignedTo], ['Kavya Rao', '', ['Kavya Rao']]);
+  assert.deepEqual([followUps(res), res.body.assignedTo], [[['Kavya Rao', '', '']], ['Kavya Rao']]);
   assert.deepEqual(await students(), ['Kavya Rao']);
   let entry = await latest();
   assert.equal(entry.actor.email, 'caller@example.com');
-  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.after, c.contact?.value]), [
-    ['contactStudent', 'added', ['Kavya Rao'], '93456 70041'],
-    ['assignedTo', 'added', ['Kavya Rao'], undefined],
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.before, c.after, c.contact?.value]), [
+    ['contactStudent', 'added', [], ['Kavya Rao'], '93456 70041'],
+    ['assignedTo', 'added', [], ['Kavya Rao'], undefined],
   ]);
 
-  // A remark, then "Others" in their own words (which must be typed).
-  res = await put({ ...phone, status: 'dnp' });
-  assert.deepEqual([res.body.outcome.student, res.body.outcome.status], ['Kavya Rao', 'dnp'], 'the student is kept');
-  assert.deepEqual((await latest()).changes.map((c) => [c.field, c.change, c.after]), [['contactRemark', 'added', ['DNP']]]);
-  assert.deepEqual((await put({ ...phone, status: 'other', note: '  ' })).body, { error: 'Remark: type what happened (Others).' });
-  res = await put({ ...phone, status: 'other', note: 'Call after 5 pm' });
+  // ...and to a second student: both have it. The same student again, in any case, changes nothing.
+  res = await put({ ...phone, student: 'Aman Gupta', add: true });
+  assert.deepEqual(followUps(res), [['Kavya Rao', '', ''], ['Aman Gupta', '', '']]);
+  assert.deepEqual(await students(), ['Kavya Rao', 'Aman Gupta']);
+  assert.deepEqual((await latest()).changes.map((c) => [c.field, c.change, c.before, c.after, c.added]), [
+    ['contactStudent', 'added', ['Kavya Rao'], ['Kavya Rao', 'Aman Gupta'], ['Aman Gupta']],
+    ['assignedTo', 'edited', ['Kavya Rao'], ['Kavya Rao', 'Aman Gupta'], ['Aman Gupta']],
+  ]);
+  const count0 = await Activity.countDocuments();
+  res = await put({ ...phone, student: 'aman GUPTA', add: true });
+  assert.deepEqual([followUps(res).length, await Activity.countDocuments()], [2, count0], 'the same student: nothing new');
+
+  // Each student's call has its own remark (recorded with whose call it was, as their name is stored).
+  await put({ ...phone, student: 'Kavya Rao', status: 'dnp' });
+  res = await put({ ...phone, student: 'aman gupta', status: 'cv-shared' });
+  assert.deepEqual(followUps(res), [['Kavya Rao', 'dnp', ''], ['Aman Gupta', 'cv-shared', '']]);
+  assert.deepEqual((await latest()).changes.map((c) => [c.field, c.change, c.after, c.contact.student]), [['contactRemark', 'added', ['CV shared'], 'Aman Gupta']]);
+  // "Others" in their own words (which must be typed); the same remark again records nothing.
+  assert.deepEqual((await put({ ...phone, student: 'Kavya Rao', status: 'other', note: '  ' })).body, { error: 'Remark: type what happened (Others).' });
+  await put({ ...phone, student: 'Kavya Rao', status: 'other', note: 'Call after 5 pm' });
   entry = await latest();
-  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.before, c.after]), [['contactRemark', 'edited', ['DNP'], ['Others: Call after 5 pm']]]);
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.before, c.after, c.contact.student]), [['contactRemark', 'edited', ['DNP'], ['Others: Call after 5 pm'], 'Kavya Rao']]);
   const count = await Activity.countDocuments();
-  await put({ ...phone, status: 'other', note: 'Call after 5 pm' });
+  await put({ ...phone, student: 'Kavya Rao', status: 'other', note: 'Call after 5 pm' });
   assert.equal(await Activity.countDocuments(), count, 'saved as it was: nothing recorded');
 
-  // The email: "Wrong number" reads "Wrong email"; given to Aman.
-  await put({ ...email, status: 'wrong' });
-  assert.deepEqual((await latest()).changes[0].after, ['Wrong email']);
-  await put({ ...email, student: 'Aman Gupta' });
-  assert.deepEqual(await students(), ['Kavya Rao', 'Aman Gupta']);
+  // A remark for a student who doesn't have it yet gives it to them first.
+  res = await put({ ...phone, student: 'Neha Verma', status: 'busy' });
+  assert.deepEqual(followUps(res).at(-1), ['Neha Verma', 'busy', '']);
+  assert.deepEqual((await latest()).changes.map((c) => c.field), ['contactStudent', 'contactRemark', 'assignedTo']);
+  assert.ok((await students()).includes('Neha Verma'));
 
-  // The report: each row with its follow-up, and the students to suggest.
+  // The email: a remark before anyone has it ("Wrong number" reads "Wrong email"); the first student given it
+  // takes that remark.
+  res = await put({ ...email, student: '', status: 'wrong' });
+  assert.deepEqual(followUps(res), [['', 'wrong', '']]);
+  assert.deepEqual((await latest()).changes[0].after, ['Wrong email']);
+  res = await put({ ...email, student: 'Aman Gupta', add: true });
+  assert.deepEqual(followUps(res), [['Aman Gupta', 'wrong', '']], 'the remark is now his call');
+  // As the report sent before a number could go to several students: a remark alone is the only student's.
+  res = await put({ ...email, status: 'dnp' });
+  assert.deepEqual(followUps(res), [['Aman Gupta', 'dnp', '']]);
+
+  // The report: each number with all its follow-ups (the first given first), and the students to suggest.
   const report = await (await fetch(`${base}/performance?days=1`)).json();
   const rowOf = (value) => report.rows.find((r) => r.value === value && String(r.job.id) === String(job4._id));
-  assert.deepEqual(
-    [rowOf('93456 70041').key, rowOf('93456 70041').outcome.student, rowOf('93456 70041').outcome.status, rowOf('93456 70041').outcome.note, rowOf('93456 70041').outcome.updatedBy.email],
-    ['9345670041', 'Kavya Rao', 'other', 'Call after 5 pm', 'caller@example.com'],
-  );
-  assert.deepEqual([rowOf('hr@zeta.in').outcome.student, rowOf('hr@zeta.in').outcome.status], ['Aman Gupta', 'wrong']);
-  assert.ok(report.students.includes('Kavya Rao') && report.students.includes('Aman Gupta'));
+  assert.deepEqual(rowOf('93456 70041').outcomes.map((o) => [o.student, o.status, o.note, o.updatedBy.email]), [
+    ['Kavya Rao', 'other', 'Call after 5 pm', 'caller@example.com'],
+    ['Aman Gupta', 'cv-shared', '', 'caller@example.com'],
+    ['Neha Verma', 'busy', '', 'caller@example.com'],
+  ]);
+  assert.equal(rowOf('93456 70041').outcome.student, 'Kavya Rao', 'the first, for a dashboard built before');
+  assert.deepEqual(rowOf('hr@zeta.in').outcomes.map((o) => [o.student, o.status]), [['Aman Gupta', 'dnp']]);
+  assert.ok(['Kavya Rao', 'Aman Gupta', 'Neha Verma'].every((s) => report.students.includes(s)));
   assert.ok(report.rows.every((r) => r.field === 'phone' || r.field === 'email'), 'follow-ups are not counted as contact details added');
 
-  // The same number written another way is the same number; the phone goes to Aman: Kavya leaves the
-  // job's list (no other number/email of it is hers), Aman stays once.
-  res = await put({ ...phone, value: '+91 93456 70041', student: 'aman gupta' });
-  assert.equal(res.body.outcome.status, 'other', 'same record');
-  assert.deepEqual(await students(), ['Aman Gupta']);
-  entry = await latest();
-  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added, c.removed]), [
-    ['contactStudent', 'edited', ['aman gupta'], ['Kavya Rao']],
-    ['assignedTo', 'edited', [], ['Kavya Rao']],
+  // Taken back from Kavya (the same number written another way): her follow-up goes, its remark too
+  // (recorded), and she leaves the job's list (no other number of it is hers).
+  res = await put({ ...phone, value: '+91 93456 70041', student: 'kavya rao', remove: true });
+  assert.deepEqual(followUps(res).map((f) => f[0]), ['Aman Gupta', 'Neha Verma']);
+  assert.deepEqual(await students(), ['Aman Gupta', 'Neha Verma']);
+  assert.deepEqual((await latest()).changes.map((c) => [c.field, c.change, c.removed]), [
+    ['contactStudent', 'removed', ['Kavya Rao']],
+    ['contactRemark', 'removed', []],
+    ['assignedTo', 'edited', ['Kavya Rao']],
   ]);
-  // Taken off the phone, Aman stays on the job: the email is still his.
-  await put({ ...phone, student: '' });
-  assert.deepEqual(await students(), ['Aman Gupta']);
-  // Nothing left on the phone: its follow-up is removed.
-  res = await put({ ...phone, status: '' });
-  assert.equal(res.body.outcome, null);
-  assert.equal(await ContactOutcome.countDocuments({ job: job4._id, field: 'phone' }), 0);
+  // Taken back from Aman, he stays on the job: the email is still his. A student who doesn't have it: nothing.
+  await put({ ...phone, student: 'Aman Gupta', remove: true });
+  assert.ok((await students()).includes('Aman Gupta'));
+  const count2 = await Activity.countDocuments();
+  await put({ ...phone, student: 'Kavya Rao', remove: true });
+  assert.equal(await Activity.countDocuments(), count2);
+  await put({ ...phone, student: 'Neha Verma', remove: true });
+  assert.equal(await ContactOutcome.countDocuments({ job: job4._id, field: 'phone' }), 0, 'nothing left on the phone');
 
   // Editing the job's details in its window leaves the follow-ups alone.
   await putAs(job4._id, { ...empty, phone: ['93456 70041'], email: ['hr@zeta.in'], assignedTo: ['Aman Gupta'], remarks: 'Called' });
-  assert.equal((await ContactOutcome.findOne({ job: job4._id, field: 'email' }).lean()).status, 'wrong');
+  assert.equal((await ContactOutcome.findOne({ job: job4._id, field: 'email' }).lean()).status, 'dnp');
 
   // Mistakes and sign-in.
-  assert.equal((await put({ ...phone, status: 'constructor' })).status, 400);
+  assert.equal((await put({ ...phone, student: 'X', status: 'constructor' })).status, 400);
   assert.equal((await put({ ...phone, field: 'fax', status: 'dnp' })).status, 400);
   assert.equal((await put({ ...phone })).status, 400, 'nothing to change');
+  assert.deepEqual((await put({ ...phone, student: '', remove: true })).body, { error: 'Say which student to take it back from.' });
+  assert.deepEqual((await put({ ...phone, student: ' ', add: true })).body, { error: 'Say which student to give it to.' });
   assert.equal((await put({ ...phone, job: '0123456789abcdef01234567', status: 'dnp' })).status, 404);
   assert.equal((await put({ ...phone, status: 'dnp' }, 'expired')).status, 401);
   assert.equal((await put({ ...phone, status: 'dnp' }, 'STUDENT:x@example.com')).status, 403);
 });
 
-test('a student and a remark saved at the same moment are both kept', async () => {
+test('saved at the same moment: a student and their remark are both kept; two students both get the number', async () => {
   const job2 = await Job.findOne({ fingerprint: 'f2' }).lean();
   const put = (body) =>
     fetch(`${base}/outcomes`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer PLACEMENT_STAFF:caller@example.com' }, body: JSON.stringify({ job: String(job2._id), field: 'phone', value: '98450 12345', ...body }) });
-  const [a, b] = await Promise.all([put({ student: 'Neha Verma' }), put({ status: 'cv-shared' })]);
+  const followUps = async () => (await ContactOutcome.find({ job: job2._id, field: 'phone' }).sort({ student: 1 }).lean()).map((o) => [o.student, o.status ?? '']);
+  const [a, b] = await Promise.all([put({ student: 'Neha Verma', add: true }), put({ student: 'Neha Verma', status: 'cv-shared' })]);
   assert.deepEqual([a.status, b.status], [200, 200]);
-  const saved = await ContactOutcome.findOne({ job: job2._id, field: 'phone' }).lean();
-  assert.deepEqual([saved.student, saved.status], ['Neha Verma', 'cv-shared']);
+  assert.deepEqual(await followUps(), [['Neha Verma', 'cv-shared']], 'one follow-up, with the remark');
   assert.ok((await Job.findById(job2._id).lean()).manual.assignedTo.includes('Neha Verma'));
+  const [c, d] = await Promise.all([put({ student: 'Riya Sen', add: true }), put({ student: 'Dev Patel', add: true })]);
+  assert.deepEqual([c.status, d.status], [200, 200]);
+  assert.deepEqual(await followUps(), [['Dev Patel', ''], ['Neha Verma', 'cv-shared'], ['Riya Sen', '']]);
+  const list = (await Job.findById(job2._id).lean()).manual.assignedTo;
+  assert.ok(['Neha Verma', 'Riya Sen', 'Dev Patel'].every((s) => list.includes(s)), list);
+  // As it was for the tests after this one: Neha only.
+  await put({ student: 'Riya Sen', remove: true });
+  await put({ student: 'Dev Patel', remove: true });
+  assert.deepEqual(await followUps(), [['Neha Verma', 'cv-shared']]);
 });
 
 test('search box: companies however spelled, HR names, emails and phone numbers written any way, kept and left-out jobs', async () => {
@@ -1313,5 +1383,126 @@ test('"Remote" is never shown as a city (top cities, the city list, course pages
   } finally {
     await Job.deleteMany({ fingerprint: /^remote/ });
     await NonFilteredJob.deleteMany({ fingerprint: /^remote/ });
+  }
+});
+
+test('a remark from the words the activity record keeps (remarkLabel the other way)', () => {
+  assert.deepEqual(remarkOf('DNP'), { status: 'dnp', note: '' });
+  assert.deepEqual(remarkOf('Wrong email'), { status: 'wrong', note: '' });
+  assert.deepEqual(remarkOf('Others: call after 5 pm'), { status: 'other', note: 'call after 5 pm' });
+  assert.deepEqual(remarkOf('Others'), { status: 'other', note: '' });
+  assert.deepEqual([remarkOf('Busy'), remarkOf('Switched off')], [{ status: 'busy', note: '' }, { status: 'switched-off', note: '' }]);
+  assert.equal(remarkOf(''), null);
+  for (const status of Object.keys(REMARKS)) {
+    for (const field of ['phone', 'email']) assert.equal(remarkOf(remarkLabel(field, status, status === 'other' ? 'x' : '')).status, status, `${status} (${field})`);
+  }
+});
+
+test('Busy and Switched off are remarks: saved, recorded in words, shown in the report', async () => {
+  const job = await Job.create({
+    fingerprint: 'busy1', title: 'Data Analyst B', company: 'Busy Co', course: 'data-analyst', cities: ['Pune'],
+    firstSeenAt: new Date(Date.now() - HOUR), lastSeenAt: new Date(Date.now() - HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: ['BZ:1'],
+  });
+  const put = async (body) => {
+    const res = await fetch(`${base}/outcomes`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job: String(job._id), field: 'phone', ...body }) });
+    return { status: res.status, body: await res.json() };
+  };
+  try {
+    let res = await put({ value: '94000 00001', status: 'busy' });
+    assert.deepEqual([res.status, res.body.outcome.status], [200, 'busy']);
+    let entry = await Activity.findOne({ 'job.id': job._id }).sort({ at: -1, _id: -1 }).lean();
+    assert.deepEqual(entry.changes.map((c) => [c.field, c.after]), [['contactRemark', ['Busy']]]);
+    res = await put({ value: '94000 00001', status: 'switched-off' });
+    assert.equal(res.body.outcome.status, 'switched-off');
+    entry = await Activity.findOne({ 'job.id': job._id }).sort({ at: -1, _id: -1 }).lean();
+    assert.deepEqual(entry.changes.map((c) => [c.field, c.before, c.after]), [['contactRemark', ['Busy'], ['Switched off']]]);
+    assert.equal((await put({ value: '94000 00001', status: 'asleep' })).body.error, 'Remark: choose one from the list.', 'only the list');
+  } finally {
+    await Job.deleteOne({ _id: job._id });
+    await Activity.deleteMany({ 'job.id': job._id });
+    await ContactOutcome.deleteMany({ job: job._id });
+  }
+});
+
+test('review board: each number with each student it was given to (or with feedback) in the period, and the numbers not given out yet', async () => {
+  const DAY = 24 * HOUR;
+  const job = await Job.create({
+    fingerprint: 'review1', title: 'Data Analyst R', company: 'Review Co', course: 'data-analyst', cities: ['Pune'],
+    firstSeenAt: new Date(Date.now() - HOUR), lastSeenAt: new Date(Date.now() - HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'],
+    sourceKeys: ['RV:1'], foundPhones: ['+91 90000 11111'],
+  });
+  const caller = 'PLACEMENT_STAFF:caller2@example.com';
+  const outcome = async (body) => {
+    const res = await fetch(`${base}/outcomes`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${caller}` }, body: JSON.stringify({ job: String(job._id), ...body }) });
+    assert.equal(res.status, 200, JSON.stringify(body));
+  };
+  const review = async (query) => (await fetch(`${base}/review?${query}`)).json();
+  try {
+    // A researcher adds two numbers and an email to the job (one number is never given out); its post had a
+    // number of its own.
+    assert.equal((await putAs(job._id, { ...empty, phone: ['93000 00001', '93000 00002'], email: ['hr@review.in'] }, 'RESEARCH_TEAM:finder@example.com')).status, 200);
+    // Given out and called today.
+    await outcome({ field: 'phone', value: '93000 00001', student: 'Riya' });
+    await outcome({ field: 'phone', value: '93000 00001', status: 'cv-shared' });
+    // ...and to a second student, whose call has a remark of its own.
+    await outcome({ field: 'phone', value: '93000 00001', student: 'Sam', add: true });
+    await outcome({ field: 'phone', value: '93000 00001', student: 'Sam', status: 'dnp' });
+    await outcome({ field: 'email', value: 'hr@review.in', student: 'Aman' });
+    await outcome({ field: 'phone', value: '90000 11111', student: 'Neha' });
+    await outcome({ field: 'phone', value: '90000 11111', status: 'other', note: 'Out of service' });
+    // Given out, then taken back: not given out.
+    await outcome({ field: 'phone', value: '98888 77777', student: 'Dev' });
+    await outcome({ field: 'phone', value: '98888 77777', student: 'Dev', remove: true });
+    // Given out three days ago (an older record); its feedback today.
+    const old = new Date(Date.now() - 3 * DAY);
+    await Activity.create({
+      at: old,
+      actor: { userId: 'user_old', email: 'Old.Caller@example.com', name: 'Old Caller', role: 'PLACEMENT_STAFF' },
+      action: 'added',
+      job: { id: job._id, set: 'filtered', title: job.title, company: job.company, course: job.course },
+      changes: [{ field: 'contactStudent', change: 'added', before: [], after: ['Kiran'], added: ['Kiran'], removed: [], contact: { field: 'email', value: 'old@review.in' } }],
+    });
+    await ContactOutcome.create({ job: job._id, field: 'email', key: 'old@review.in', value: 'old@review.in', student: 'Kiran', updatedAt: old });
+    await outcome({ field: 'email', value: 'old@review.in', status: 'wrong' }); // a remark alone: the only student's
+
+    const today = await review('days=1');
+    const mine = today.rows.filter((r) => String(r.job.id) === String(job._id));
+    const rowOf = (value, student) => mine.find((r) => r.value === value && r.student === student);
+    assert.deepEqual(mine.map((r) => `${r.value} ${r.student}`).sort(), [
+      '90000 11111 Neha', '93000 00001 Riya', '93000 00001 Sam', '93000 00002 ', 'hr@review.in Aman', 'old@review.in Kiran',
+    ], 'a row per number and student; the number taken back from Dev is not there');
+    assert.equal(today.rows[0].value, 'old@review.in', 'the latest first');
+    const a = rowOf('93000 00001', 'Riya');
+    assert.deepEqual([a.found.source, a.found.by.email], ['team', 'finder@example.com'], 'found by the person who added it');
+    assert.deepEqual([a.given.student, a.given.by.email, a.given.inPeriod], ['Riya', 'caller2@example.com', true]);
+    assert.deepEqual([a.feedback.status, a.feedback.label, a.feedback.by.email], ['cv-shared', 'CV shared', 'caller2@example.com']);
+    assert.ok(a.feedback.hours >= 0 && a.feedback.hours < 0.1, `called right after it was given out: ${a.feedback.hours} h`);
+    assert.deepEqual([a.now.student, a.now.status, a.job.course, a.job.company, a.withStudents], ['Riya', 'cv-shared', 'data-analyst', 'Review Co', 2]);
+    const sam = rowOf('93000 00001', 'Sam');
+    assert.deepEqual([sam.given.student, sam.feedback.status, sam.now.status, sam.contact], ['Sam', 'dnp', 'dnp', a.contact], "the same number, Sam's own call");
+    const b = rowOf('hr@review.in', 'Aman');
+    assert.deepEqual([b.given.student, b.feedback, b.now.status], ['Aman', null, ''], 'given out, no feedback yet');
+    assert.deepEqual([a.added.by.email, b.added.by.email], ['finder@example.com', 'finder@example.com'], 'added by the team today');
+    const n = rowOf('93000 00002', '');
+    assert.deepEqual([n.added.by.email, n.found.source, n.given, n.feedback, n.now, n.withStudents], ['finder@example.com', 'team', null, null, null, 0], 'added today, not given out yet');
+    const c = rowOf('90000 11111', 'Neha');
+    assert.deepEqual([c.found.source, c.found.by, c.feedback.status, c.feedback.note, c.added], ['post', null, 'other', 'Out of service', null], 'found in the job post: not added by anyone');
+    const d = rowOf('old@review.in', 'Kiran');
+    assert.deepEqual([d.found.source, d.given.student, d.given.inPeriod, d.given.by.email, d.feedback.label, d.feedback.status], ['earlier', 'Kiran', false, 'old.caller@example.com', 'Wrong email', 'wrong']);
+    assert.ok(Math.abs(d.feedback.hours - 72) < 0.1, `hours from given out to feedback: ${d.feedback.hours}`);
+
+    // That day three days ago: given out then; today's feedback is not in that period.
+    const day = new Date(old.getTime() + 330 * 60_000).toISOString().slice(0, 10);
+    const then = await review(`from=${day}&to=${day}`);
+    const e = then.rows.find((r) => r.value === 'old@review.in');
+    assert.deepEqual([e.given.inPeriod, e.given.student, e.feedback], [true, 'Kiran', null]);
+    assert.ok(!then.rows.some((r) => r.value === '93000 00001'));
+    assert.equal((await review('days=7')).rows.filter((r) => String(r.job.id) === String(job._id)).length, 6);
+
+    assert.equal((await fetch(`${base}/review?days=1`, { headers: { Authorization: 'Bearer expired' } })).status, 401, 'signed-in people only');
+  } finally {
+    await Job.deleteOne({ _id: job._id });
+    await Activity.deleteMany({ 'job.id': job._id });
+    await ContactOutcome.deleteMany({ job: job._id });
   }
 });

@@ -4,9 +4,9 @@ import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
 import { EXCLUDED_COMPANIES, underExperienceText } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
-import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob } from '../models.js';
+import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob, STUDENT_COLLATION } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
-import { contactKey, outcomeChanges, parseOutcomeInput } from '../outcomes.js';
+import { contactKey, parseOutcomeInput, remarkChange, remarkOf, studentChange } from '../outcomes.js';
 import { requirePermission } from '../auth.js';
 import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
@@ -292,18 +292,24 @@ router.get('/meta', wrap(async (req, res) => {
 }));
 
 // New jobs per course in the chosen window, plus the window before it for "vs previous" (empty when
-// the two can't be compared fairly: see collectedEveryDay).
+// the two can't be compared fairly: see collectedEveryDay), and how many of the window's jobs have HR
+// details (withHrDetails: the job list's test, so ?hr=some lists exactly those and ?hr=none the rest).
 router.get('/summary', wrap(async (req, res) => {
   const J = jobsFor(req);
   const { days, anchor, start, end, from, to } = await periodRange(req.query, 1);
   const prevStart = new Date(start.getTime() - days * DAY_MS);
-  const byCourse = (from, to) =>
+  const byCourse = (from, to, also = {}) =>
     J.aggregate([
-      { $match: { firstSeenAt: { $gte: from, $lt: to } } },
+      { $match: { firstSeenAt: { $gte: from, $lt: to }, ...also } },
       { $group: { _id: '$course', count: { $sum: 1 } } },
     ]).then(countBy);
-  const [current, previous, comparable] = await Promise.all([byCourse(start, end), byCourse(prevStart, start), collectedEveryDay(prevStart, end)]);
-  res.json({ days, anchor, from, to, current, previous: comparable ? previous : {}, comparable });
+  const [current, previous, comparable, withHrDetails] = await Promise.all([
+    byCourse(start, end),
+    byCourse(prevStart, start),
+    collectedEveryDay(prevStart, end),
+    byCourse(start, end, HAS_HR_DETAILS),
+  ]);
+  res.json({ days, anchor, from, to, current, previous: comparable ? previous : {}, comparable, withHrDetails });
 }));
 
 // New jobs per platform and course. Each job counts once, under its primary platform.
@@ -835,6 +841,11 @@ router.get('/activity', requirePermission('view'), wrap(async (req, res) => {
 // written differently, or one the job's posting already had, isn't one (see activity.js). The
 // dashboard groups the rows person → course → company → job. Signed-in people with an allowed role.
 const CONTACT_FIELDS = ['phone', 'email'];
+// One follow-up as the dashboard gets it (student '': a remark made before anyone was given the number).
+const outcomeView = (o) => ({ student: o.student ?? '', status: o.status ?? '', note: o.note ?? '', updatedAt: o.updatedAt ?? null, updatedBy: o.updatedBy ?? null });
+// The one follow-up a dashboard built before a number could go to several students reads (`outcome`): the first
+// student's, else the number's own remark. Kept until every dashboard reads `outcomes`.
+const firstOutcome = (outcomes) => outcomes.find((o) => o.student) ?? outcomes[0] ?? null;
 const MAX_PERFORMANCE_ROWS = 20_000;
 
 router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
@@ -862,9 +873,13 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
     Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean(),
   ]);
   const shown = rows.slice(0, MAX_PERFORMANCE_ROWS);
-  // Each number/email's follow-up (who it was given to, how it went): the same for every row of it.
-  const outcomes = await ContactOutcome.find({ job: { $in: [...new Set(shown.map((r) => String(r.job.id)))] } }).lean();
-  const outcomeOf = new Map(outcomes.map((o) => [`${o.job}|${o.field}|${o.key}`, o]));
+  // Each number/email's follow-ups (the students it was given to, how each call went; the first given first):
+  // the same for every row of it.
+  const outcomesOf = new Map();
+  for (const o of await ContactOutcome.find({ job: { $in: [...new Set(shown.map((r) => String(r.job.id)))] } }).sort({ _id: 1 }).lean()) {
+    const id = `${o.job}|${o.field}|${o.key}`;
+    outcomesOf.set(id, [...(outcomesOf.get(id) ?? []), outcomeView(o)]);
+  }
   res.json({
     days: range.days,
     from: range.from,
@@ -872,11 +887,146 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
     since: first?.at ?? null, // when the activity record began: nothing before it can be counted
     rows: shown.map((row) => {
       const key = contactKey(row.field, row.value);
-      const o = outcomeOf.get(`${row.job.id}|${row.field}|${key}`);
-      return { ...row, key, outcome: o ? { student: o.student ?? '', status: o.status ?? '', note: o.note ?? '', updatedAt: o.updatedAt ?? null, updatedBy: o.updatedBy ?? null } : null };
+      const outcomes = outcomesOf.get(`${row.job.id}|${row.field}|${key}`) ?? [];
+      return { ...row, key, outcomes, outcome: firstOutcome(outcomes) };
     }),
     truncated: rows.length > MAX_PERFORMANCE_ROWS,
     students: await knownStudents(), // names to suggest when assigning
+  });
+}));
+
+// ---------- Review board ----------
+
+// The HR numbers and emails given to students in a period, and the feedback on each student's call (from the
+// activity record; days end today, as in the Performance report). A number can go to several students, so a
+// row is one number with one student: given to them in the period, or with feedback on their call recorded in
+// it. Plus one row (student '') for each number the team added in the period that no student has now (still
+// to give out); it also holds a remark recorded on the number before anyone was given it. Each row has: its
+// job; when the team added the number (if in the period); who found it (the person who added it to the job,
+// else the job post, else "earlier": before the record began); the latest time it was given to the student up
+// to the period's end (by whom, whether in the period; none if taken back since); the feedback recorded in the
+// period (the latest: its remark, by whom, when, and the hours since the number was given to the student);
+// the student's follow-up now; and how many students have the number now. The dashboard counts, groups and
+// filters these. A remark recorded before a number could go to several students names no student: it was the
+// call of whoever had the number then. Signed-in people only.
+const MAX_REVIEW_ROWS = 5_000;
+const latestIn = (row) => Math.max(+(row.added?.at ?? 0), row.given?.inPeriod ? +row.given.at : 0, +(row.feedback?.at ?? 0));
+
+router.get('/review', requirePermission('view'), wrap(async (req, res) => {
+  const range = activityRange(req.query);
+  const fields = ['contactStudent', 'contactRemark', ...CONTACT_FIELDS];
+  const person = (actor) => ({ email: String(actor?.email ?? '').toLowerCase(), name: actor?.name ?? '' });
+  const contactOf = (jobId, field, value) => `${jobId}|${field}|${contactKey(field, value)}`;
+  const inPeriod = (at) => at >= range.start;
+
+  // The jobs anything happened on in the period, then their whole record up to its end, oldest first.
+  const [jobIds, first] = await Promise.all([
+    Activity.distinct('job.id', { at: { $gte: range.start, $lt: range.end }, 'changes.field': { $in: fields } }),
+    Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean(),
+  ]);
+  const [history, outcomes, posts] = await Promise.all([
+    Activity.find({ 'job.id': { $in: jobIds }, at: { $lt: range.end }, 'changes.field': { $in: fields } }, { at: 1, actor: 1, job: 1, changes: 1 })
+      .sort({ at: 1, _id: 1 })
+      .lean(),
+    ContactOutcome.find({ job: { $in: jobIds } }).lean(),
+    Promise.all([Job, NonFilteredJob].map((model) => model.find({ _id: { $in: jobIds } }, { foundPhones: 1, foundEmails: 1 }).lean())),
+  ]);
+
+  // Each number's story as it happened: who added it, the students it is with, and each student's call (when
+  // they were last given it, and the feedback recorded in the period).
+  const contacts = new Map();
+  const contactFor = (entry, field, value) => {
+    const id = contactOf(entry.job.id, field, value);
+    if (!contacts.has(id)) contacts.set(id, { id, job: entry.job, field, value, finder: null, added: null, students: new Map(), calls: new Map() });
+    return contacts.get(id);
+  };
+  const callOf = (contact, student) => {
+    const k = student.toLowerCase();
+    if (!contact.calls.has(k)) contact.calls.set(k, { student, given: null, feedback: null });
+    return contact.calls.get(k);
+  };
+  for (const entry of history) {
+    const by = person(entry.actor);
+    for (const change of entry.changes) {
+      if (CONTACT_FIELDS.includes(change.field)) {
+        // Added to the job by the team (a number only written differently isn't one: activity.js).
+        for (const value of change.added ?? []) {
+          const contact = contactFor(entry, change.field, value);
+          contact.finder ??= by;
+          if (inPeriod(entry.at)) contact.added ??= { at: entry.at, by };
+        }
+      } else if (change.contact && change.field === 'contactStudent') {
+        const contact = contactFor(entry, change.contact.field, change.contact.value);
+        for (const name of change.removed ?? []) {
+          contact.students.delete(name.toLowerCase());
+          callOf(contact, name).given = null; // taken back: not given out
+        }
+        for (const name of change.added ?? []) {
+          contact.students.set(name.toLowerCase(), name);
+          callOf(contact, name).given = { at: entry.at, by, student: name };
+        }
+      } else if (change.contact && change.field === 'contactRemark' && inPeriod(entry.at)) {
+        const contact = contactFor(entry, change.contact.field, change.contact.value);
+        const student = change.contact.student ?? (contact.students.size === 1 ? [...contact.students.values()][0] : '');
+        const call = callOf(contact, student);
+        const label = change.after?.[0] ?? '';
+        call.feedback = label ? { at: entry.at, by, label, ...remarkOf(label), givenAt: call.given?.at ?? null } : null;
+      }
+    }
+  }
+
+  const inPost = new Set(
+    posts.flat().flatMap((job) => [...(job.foundPhones ?? []).map((v) => contactOf(job._id, 'phone', v)), ...(job.foundEmails ?? []).map((v) => contactOf(job._id, 'email', v))]),
+  );
+  const outcomeOf = new Map(outcomes.map((o) => [`${o.job}|${o.field}|${o.key}|${(o.student ?? '').toLowerCase()}`, o]));
+  const withStudents = new Map();
+  for (const o of outcomes) if (o.student) withStudents.set(`${o.job}|${o.field}|${o.key}`, (withStudents.get(`${o.job}|${o.field}|${o.key}`) ?? 0) + 1);
+
+  const rows = [];
+  for (const contact of contacts.values()) {
+    const { id, set, title, company, course } = contact.job;
+    const base = {
+      contact: contact.id,
+      job: { id, set, title, company, course },
+      field: contact.field,
+      value: contact.value,
+      key: contactKey(contact.field, contact.value),
+      found: contact.finder ? { source: 'team', by: contact.finder } : { source: inPost.has(contact.id) ? 'post' : 'earlier', by: null },
+      added: contact.added,
+      withStudents: withStudents.get(contact.id) ?? 0,
+    };
+    const row = (call) => {
+      const o = outcomeOf.get(`${contact.id}|${call.student.toLowerCase()}`);
+      return {
+        ...base,
+        id: `${contact.id}|${call.student.toLowerCase()}`,
+        student: call.student,
+        given: call.given && { ...call.given, inPeriod: inPeriod(call.given.at) },
+        feedback: call.feedback && {
+          at: call.feedback.at,
+          by: call.feedback.by,
+          label: call.feedback.label,
+          status: call.feedback.status,
+          note: call.feedback.note,
+          hours: call.feedback.givenAt ? (call.feedback.at - call.feedback.givenAt) / 3_600_000 : null,
+        },
+        now: o ? { student: o.student ?? '', status: o.status ?? '', note: o.note ?? '' } : null,
+      };
+    };
+    const calls = [...contact.calls.values()].filter((call) => (call.given && inPeriod(call.given.at)) || call.feedback);
+    rows.push(...calls.map(row));
+    // Added in the period and no student has it now: still to give out.
+    if (contact.added && !base.withStudents && !calls.some((call) => !call.student)) rows.push(row({ student: '', given: null, feedback: null }));
+  }
+  // The latest first: when it was added, given out or called in the period.
+  rows.sort((a, b) => latestIn(b) - latestIn(a));
+  res.json({
+    days: range.days,
+    from: range.from,
+    to: range.to,
+    since: first?.at ?? null, // when the activity record began: nothing before it can be counted
+    rows: rows.slice(0, MAX_REVIEW_ROWS),
+    truncated: rows.length > MAX_REVIEW_ROWS,
   });
 }));
 
@@ -888,14 +1038,16 @@ async function knownStudents() {
   return [...names.values()].sort((a, b) => a.localeCompare(b)).slice(0, 2000);
 }
 
-// One number or email's follow-up, from the performance report: the student it was given to, or how it
-// went (each saved on its own, as soon as it is chosen). The student is also put on the job's "Assigned
-// to" list, and a student no longer given any of the job's numbers/emails is taken off it again. Recorded
-// in the activity record under the person's email, like any change.
+// One number or email's follow-up with one student, from the performance report or the Assign page (see
+// parseOutcomeInput): give it to a student, take it back, or record how their call went. A number can go to
+// several students, each with a remark of their own. A student given any of a job's numbers/emails is on the
+// job's "Assigned to" list, and leaves it when none is theirs any more. Recorded in the activity record under
+// the person's email, like any change. Answers with the number's follow-ups now and the job's list.
 router.put('/outcomes', requirePermission('record-outcomes'), express.json({ limit: '4kb' }), wrap(async (req, res) => {
   const input = parseOutcomeInput(req.body);
   if (input.error) return res.status(400).json({ error: input.error });
-  const { job: jobId, field, value, key } = input.value;
+  const { job: jobId, field, value, key, remove } = input.value;
+  const remarking = 'status' in input.value;
   const fields = { manual: 1, title: 1, company: 1, course: 1 };
   let model = Job;
   let job = await Job.findById(jobId, fields).lean();
@@ -905,40 +1057,49 @@ router.put('/outcomes', requirePermission('record-outcomes'), express.json({ lim
   }
   if (!job) return res.status(404).json({ error: 'Job not found. It may have been removed.' });
 
-  const current = await ContactOutcome.findOne({ job: job._id, field, key }).lean();
-  const was = { student: current?.student ?? '', status: current?.status ?? '', note: current?.note ?? '' };
-  const next = {
-    student: 'student' in input.value ? input.value.student : was.student,
-    status: 'status' in input.value ? input.value.status : was.status,
-    note: 'status' in input.value ? input.value.note : was.note,
-  };
-
-  // The job's "Assigned to" list: the new student on it; the old one off it unless another of the job's
-  // numbers/emails is still given to them.
   const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const docs = await ContactOutcome.find({ job: job._id, field, key }).sort({ _id: 1 }).lean();
+  const named = docs.filter((d) => d.student);
+  const loose = docs.find((d) => !d.student) ?? null; // a remark made before anyone was given it
+  // Whose follow-up: the student sent; a remark sent without one (as the report did before a number could go
+  // to several students) is the only student's, else the number's own.
+  const student = !input.value.studentSent && remarking && named.length === 1 ? named[0].student : input.value.student;
+  const mine = student ? (named.find((d) => same(d.student, student)) ?? null) : loose;
+  // The first student given it takes over a remark made before anyone was given it.
+  const takeOver = student && !remove && !mine && !named.length ? loose : null;
+
+  const before = named.map((d) => d.student);
+  const after = remove ? before.filter((s) => !same(s, student)) : student && !mine ? [...before, student] : before;
+  const kept = mine ?? takeOver;
+  const was = { status: kept?.status ?? '', note: kept?.note ?? '' };
+  const next = remove ? { status: '', note: '' } : remarking ? { status: input.value.status, note: input.value.note } : was;
+
+  // The job's "Assigned to" list: the student on it; one taken back leaves it unless another of the job's
+  // numbers/emails is still theirs.
   const students = job.manual?.assignedTo ?? [];
   let nextStudents = students;
-  if (next.student && !students.some((s) => same(s, next.student))) nextStudents = [...students, next.student];
-  if (was.student && !same(was.student, next.student)) {
-    const stillGiven = await ContactOutcome.exists({
-      job: job._id,
-      ...(current ? { _id: { $ne: current._id } } : {}),
-      student: new RegExp(`^${escapeRegex(was.student)}$`, 'i'),
-    });
-    if (!stillGiven) nextStudents = nextStudents.filter((s) => !same(s, was.student));
+  if (student && !remove && !students.some((s) => same(s, student))) nextStudents = [...students, student];
+  if (remove && mine) {
+    const stillGiven = await ContactOutcome.exists({ job: job._id, _id: { $ne: mine._id }, student: new RegExp(`^${escapeRegex(student)}$`, 'i') });
+    if (!stillGiven) nextStudents = nextStudents.filter((s) => !same(s, student));
   }
   if (nextStudents.length > MAX_STUDENTS && nextStudents.length > students.length) {
     return res.status(400).json({ error: `Assigned to: this job already has ${MAX_STUDENTS} students.` });
   }
 
-  const changes = outcomeChanges(field, value, was, next);
+  // Recorded with the student's name as it is stored (as first given), whatever case it was sent in.
+  const name = mine?.student ?? student;
+  const changes = [...studentChange(field, value, before, after), ...remarkChange(field, value, name, was, next)];
   const added = nextStudents.filter((s) => !students.includes(s));
   const removed = students.filter((s) => !nextStudents.includes(s));
   if (added.length || removed.length) {
     changes.push({ field: 'assignedTo', change: !students.length ? 'added' : !nextStudents.length ? 'removed' : 'edited', before: students, after: nextStudents, added, removed });
   }
-  const answer = (o) => ({ outcome: o && (o.student || o.status) ? { student: o.student ?? '', status: o.status ?? '', note: o.note ?? '', updatedAt: o.updatedAt ?? null, updatedBy: o.updatedBy ?? null } : null, assignedTo: nextStudents });
-  if (!changes.length) return res.json(answer(current));
+  const answer = async (assignedTo) => {
+    const outcomes = (await ContactOutcome.find({ job: job._id, field, key }).sort({ _id: 1 }).lean()).map(outcomeView);
+    return { outcomes, outcome: firstOutcome(outcomes), assignedTo };
+  };
+  if (!changes.length) return res.json(await answer(students));
 
   // As for HR details: the record first, so nothing changes without one; removed again if the save fails.
   const now = new Date();
@@ -951,18 +1112,28 @@ router.put('/outcomes', requirePermission('record-outcomes'), express.json({ lim
     changes,
   });
   try {
-    // Only what was sent is written (the student, or the remark), so a student and a remark saved at
-    // the same moment don't undo each other. Nothing left on it: the follow-up goes.
-    const set = { value, updatedAt: now, updatedBy: { email: req.person.email, name: req.person.name ?? '' } };
-    if ('student' in input.value) set.student = next.student;
-    if ('status' in input.value) Object.assign(set, { status: next.status, note: next.note });
-    let saved = await ContactOutcome.findOneAndUpdate({ job: job._id, field, key }, { $set: set }, { upsert: true, returnDocument: 'after' }).lean();
-    if (!saved.student && !saved.status) {
-      await ContactOutcome.deleteOne({ _id: saved._id, student: { $in: [null, ''] }, status: { $in: [null, ''] } });
-      saved = null;
+    // Only what was sent is written (the student, or the remark), so a student and a remark saved at the same
+    // moment don't undo each other.
+    const set = { value, updatedAt: now, updatedBy: { email: req.person.email, name: req.person.name ?? '' }, ...(remarking ? { status: next.status, note: next.note } : {}) };
+    if (remove) {
+      if (mine) await ContactOutcome.deleteOne({ _id: mine._id });
+    } else if (takeOver) {
+      await ContactOutcome.updateOne({ _id: takeOver._id }, { $set: { ...set, student } });
+    } else if (student) {
+      // The student's follow-up, made if they have none: the unique index (one per number and student, in any
+      // case) keeps the same student sent twice at once to one; the save that lost the race updates it.
+      const filter = { job: job._id, field, key, student: name };
+      const save = (upsert) => ContactOutcome.updateOne(filter, { $set: set }, { upsert, collation: STUDENT_COLLATION });
+      await save(true).catch((err) => (err.code === 11000 ? save(false) : Promise.reject(err)));
+    } else if (loose) {
+      // The number's own remark (no student has it): cleared, nothing is left of it.
+      if (next.status) await ContactOutcome.updateOne({ _id: loose._id }, { $set: set });
+      else await ContactOutcome.deleteOne({ _id: loose._id });
+    } else if (next.status) {
+      await ContactOutcome.create({ job: job._id, field, key, student: '', ...set });
     }
-    // The job's list: one name added or taken off at a time (not the whole list written back), then
-    // the job's typed-in details removed if nothing at all is left in them.
+    // The job's list: one name added or taken off at a time (not the whole list written back), then the job's
+    // typed-in details removed if nothing at all is left in them.
     if (added.length) await model.updateOne({ _id: job._id }, { $addToSet: { 'manual.assignedTo': { $each: added } }, $set: { 'manual.updatedAt': now } });
     if (removed.length) {
       await model.updateOne({ _id: job._id }, { $pull: { 'manual.assignedTo': { $in: removed } }, $set: { 'manual.updatedAt': now } });
@@ -971,7 +1142,7 @@ router.put('/outcomes', requirePermission('record-outcomes'), express.json({ lim
         await model.updateOne({ _id: job._id }, { $unset: { manual: 1 } });
       }
     }
-    res.json(answer(saved));
+    res.json(await answer(nextStudents));
   } catch (err) {
     await Activity.deleteOne({ _id: entry._id }).catch((e) => console.error(`Could not remove activity ${entry._id}: ${e.message}`));
     throw err;

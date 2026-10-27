@@ -3,6 +3,7 @@
 
 import { COURSES } from '../config/courses.js';
 import { experienceRangeText } from '../config/filters.js';
+import { REMARKS } from '../outcomes.js';
 
 const IST = 'Asia/Kolkata';
 const fmt = (date, options) => new Intl.DateTimeFormat('en-IN', { timeZone: IST, ...options }).format(date);
@@ -20,7 +21,11 @@ export function describePage(context = {}) {
           ? 'Hiring partners'
           : path.startsWith('/sre')
             ? 'the SRE Openings page (Site Reliability Engineer openings)'
-            : 'the Dashboard (all courses)';
+            : path.startsWith('/review')
+              ? 'the Review board (HR numbers given to students, the feedback on the calls, and how good the contacts are)'
+              : path.startsWith('/assign')
+                ? 'the Assign numbers page (HR numbers and emails no student has yet, to give to students)'
+                : 'the Dashboard (all courses)';
   const p = context.period ?? {};
   const period = p.from ? (p.from === p.to ? `the day ${p.from}` : `${p.from} to ${p.to}`) : p.days === 1 ? 'the latest day' : p.days ? `the last ${p.days} days` : '';
   const view = { nonfiltered: 'Non-filtered', all: 'All' }[context.view] ?? 'Filtered';
@@ -39,7 +44,7 @@ How the dashboard counts:
 - Filtered (the default) = kept jobs: ${experienceRangeText()} years of experience, not from big IT services firms. Non-filtered = jobs those rules leave out (e.g. fresher jobs), and jobs found only by the extra searches (${COURSES.flatMap((c) => c.extraSearchTerms ?? []).join(', ')}). All = both together (each job is in one of the two, so All = Filtered + Non-filtered).
 - A period is compared with the same number of days just before only when collection ran on every one of those days.
 - HR details of a job: HR names, HR profile links, phone numbers, emails (typed in by the team, or found in the job post), the students it is assigned to, and notes.
-- Performance report: each HR phone number/email a staff member added (counted once), and its follow-up: the student it was given to and a remark (DNP, Wrong number, Not the correct person, CV shared, No openings, Others). Its days end today.
+- Performance report: each HR phone number/email a staff member added (counted once), and its follow-up: the student it was given to and a remark (${Object.values(REMARKS).join(', ')}). Its days end today.
 
 Rules:
 1. Every number, name and fact about the data comes from your tools. Never guess or invent one. If the tools can't answer, say so plainly.
