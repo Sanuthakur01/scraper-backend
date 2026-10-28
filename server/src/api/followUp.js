@@ -9,6 +9,11 @@ import { formatIndianPhone, phoneKey } from '../normalize.js';
 
 export const PHONE_EXISTS = 'This number already exists.';
 
+// Where the research team found a job's HR contact ("Found by"): needed whenever HR contact details (names,
+// profile links, phones, emails) are added or changed; the dashboard has a dropdown of these.
+export const HR_SOURCES = { signalhire: 'SignalHire', apollo: 'Apollo', linkedin: 'LinkedIn', naukri: 'Naukri', indeed: 'Indeed' };
+export const FOUND_BY_REQUIRED = `Found by: choose where the HR contact was found (${Object.values(HR_SOURCES).join(', ')}).`;
+
 // Phone numbers, email addresses, HR names and HR profile links a job can have typed in (each; the
 // dashboard has a box for each value).
 export const MAX_ENTRIES = 10;
@@ -53,6 +58,7 @@ export function contactView({ foundPhones, foundEmails, manual }) {
   return {
     hrNames: manual?.hrNames ?? [],
     hrProfiles: manual?.hrProfiles ?? [],
+    foundBy: manual?.foundBy ?? '', // where the HR contact was found (HR_SOURCES), '' = not said
     phone,
     phoneSource,
     email,
@@ -69,7 +75,7 @@ export const jobRow = ({ foundPhones, foundEmails, manual, ...job }) => ({
   contact: contactView({ foundPhones, foundEmails, manual }),
 });
 
-// Checks what was typed in. Returns { value: { hrNames, hrProfiles, phone, phoneKeys, email, remarks, assignedTo } }
+// Checks what was typed in. Returns { value: { hrNames, hrProfiles, foundBy, phone, phoneKeys, email, remarks, assignedTo } }
 // or { error: 'message' }. HR names and profile links: up to MAX_ENTRIES each, one per box.
 // Up to MAX_ENTRIES phone numbers and as many email addresses, each sent in its own box (a list) or
 // separated by commas; they are stored as one comma-separated text ("98765 43210, 080 4123 4567").
@@ -108,6 +114,10 @@ export function parseFollowUpInput(body) {
   const emails = typedEmails.filter((e, i) => typedEmails.findIndex((f) => f.toLowerCase() === e.toLowerCase()) === i);
   if (emails.length > MAX_ENTRIES) return { error: `Email: at most ${MAX_ENTRIES} addresses per job.` };
 
+  // Where the HR contact was found: one of HR_SOURCES ('' = not sent; whether it is needed is the route's to say).
+  const foundBy = body.foundBy == null ? '' : String(body.foundBy).trim().toLowerCase();
+  if (foundBy && !HR_SOURCES[foundBy]) return { error: `Found by: "${clip(foundBy)}" is not one of ${Object.values(HR_SOURCES).join(', ')}.` };
+
   // Students the job is assigned to: one name per box (or separated by commas), each name once.
   const typedNames = entriesOf(body.assignedTo, /[,;\n]/);
   const longName = typedNames.find((n) => n.length > NAME_LIMIT);
@@ -115,17 +125,19 @@ export function parseFollowUpInput(body) {
   const assignedTo = typedNames.filter((n, i) => typedNames.findIndex((m) => m.toLowerCase() === n.toLowerCase()) === i);
   if (assignedTo.length > MAX_STUDENTS) return { error: `Assign to: at most ${MAX_STUDENTS} students per job.` };
 
-  return { value: { hrNames, hrProfiles, phone: phones.join(', '), phoneKeys: phones.map(phoneKey), email: emails.join(', '), remarks, assignedTo } };
+  return { value: { hrNames, hrProfiles, foundBy, phone: phones.join(', '), phoneKeys: phones.map(phoneKey), email: emails.join(', '), remarks, assignedTo } };
 }
 
 const clip = (text) => (text.length > 40 ? `${text.slice(0, 40)}…` : text);
 
 // The `manual` field to store from what was typed in, or null when nothing is entered (the field is removed).
-export function manualRecord({ hrNames = [], hrProfiles = [], phone, phoneKeys, email, remarks, assignedTo = [] }, now) {
+export function manualRecord({ hrNames = [], hrProfiles = [], foundBy = '', phone, phoneKeys, email, remarks, assignedTo = [] }, now) {
   if (!hrNames.length && !hrProfiles.length && !phone && !email && !remarks && !assignedTo.length) return null;
+  const contacts = hrNames.length || hrProfiles.length || phone || email;
   return {
     ...(hrNames.length ? { hrNames } : {}),
     ...(hrProfiles.length ? { hrProfiles } : {}),
+    ...(contacts && foundBy ? { foundBy } : {}), // kept only with HR contact details
     phone,
     phoneKeys,
     email,

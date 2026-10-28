@@ -134,7 +134,7 @@ test('a question: its numbers come from the tools, no contact ever reaches the A
 });
 
 test('a proposed change waits for Confirm; then it is saved like on the dashboard and recorded as via IJF AI', async () => {
-  script = [{ tools: [{ name: 'propose_hr_details', args: { job_id: String(job2._id), phones: ['[phone 1]'], hr_names: ['Anil Kumar'] } }] }, { text: 'Check the card and click Confirm.' }];
+  script = [{ tools: [{ name: 'propose_hr_details', args: { job_id: String(job2._id), phones: ['[phone 1]'], hr_names: ['Anil Kumar'], found_by: 'apollo' } }] }, { text: 'Check the card and click Confirm.' }];
   const first = await ask('Add 93456 70071 and HR Anil Kumar to the Zeta Labs job');
   const action = first.done.message.actions[0];
   assert.equal(action.status, 'pending');
@@ -158,7 +158,7 @@ test('a proposed change waits for Confirm; then it is saved like on the dashboar
   assert.match(sent[0], /confirmed and saved/);
 
   // A number another job has: no change proposed; the AI is told why.
-  script = [{ tools: [{ name: 'propose_hr_details', args: { job_id: String(job2._id), phones: ['[phone 1]'] } }] }, { text: (m) => lastTool(m).error }];
+  script = [{ tools: [{ name: 'propose_hr_details', args: { job_id: String(job2._id), phones: ['[phone 1]'], found_by: 'apollo' } }] }, { text: (m) => lastTool(m).error }];
   const taken = await ask('Add 98450 12345 to Zeta Labs');
   assert.equal(taken.done.message.actions.length, 0);
   assert.match(taken.done.message.content, /This number already exists/);

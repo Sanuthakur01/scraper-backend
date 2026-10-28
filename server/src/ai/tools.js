@@ -6,7 +6,7 @@
 import { COURSES } from '../config/courses.js';
 import { experienceRangeText } from '../config/filters.js';
 import { routeHandlers } from '../api/routes.js';
-import { contactView, findPhoneOwner, parseFollowUpInput, PHONE_EXISTS } from '../api/followUp.js';
+import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, HR_SOURCES, parseFollowUpInput, PHONE_EXISTS } from '../api/followUp.js';
 import { ContactOutcome, Job, NonFilteredJob } from '../models.js';
 import { shownCities } from '../normalize.js';
 import { contactKey, parseOutcomeInput, REMARKS, remarkLabel } from '../outcomes.js';
@@ -209,13 +209,14 @@ export const TOOLS = [
   tool('get_collection_status', 'The latest daily collection: when it ran, whether it worked, new jobs per site, and any searches that failed.'),
   tool(
     'propose_hr_details',
-    "Propose adding HR details to a job: phone numbers, emails, HR names, HR profile links, students, a note. Nothing is saved until the person clicks Confirm on the card. Use stand-ins such as [phone 1] exactly as given.",
+    "Propose adding HR details to a job: phone numbers, emails, HR names, HR profile links, students, a note. Adding HR contact details (phones, emails, names, profile links) needs found_by: where the person found them; ask them if they didn't say. Nothing is saved until the person clicks Confirm on the card. Use stand-ins such as [phone 1] exactly as given.",
     {
       job_id: { type: 'string' },
       phones: { type: 'array', items: { type: 'string' } },
       emails: { type: 'array', items: { type: 'string' } },
       hr_names: { type: 'array', items: { type: 'string' } },
       hr_profiles: { type: 'array', items: { type: 'string' } },
+      found_by: { type: 'string', enum: Object.keys(HR_SOURCES), description: `Where the HR contact was found: ${Object.entries(HR_SOURCES).map(([id, label]) => `${id} = ${label}`).join('; ')}.` },
       students: { type: 'array', items: { type: 'string' } },
       note: { type: 'string', description: "Added under the job's notes." },
     },
@@ -525,9 +526,12 @@ const RUN = {
       ctx.secrets,
     );
     const note = args.note ? reveal(String(args.note), ctx.secrets).trim() : '';
-    const body = hrDetailsBody(job, add, note);
+    const foundBy = HR_SOURCES[args.found_by] ? args.found_by : '';
+    const body = hrDetailsBody(job, add, note, foundBy);
     const parsed = parseFollowUpInput(body);
     if (parsed.error) return { error: parsed.error };
+    const addsContacts = add.phones.length || add.emails.length || add.hrNames.length || add.hrProfiles.length;
+    if (addsContacts && !body.foundBy) return { error: `${FOUND_BY_REQUIRED} Ask the person where they found it.` };
     const owner = await findPhoneOwner(parsed.value.phoneKeys, job);
     if (owner) return { error: `${PHONE_EXISTS} It is already saved on "${owner.job.title}"${owner.job.company ? ` at ${owner.job.company}` : ''}.` };
     const parts = [
@@ -535,12 +539,13 @@ const RUN = {
       add.emails.length && `email ${add.emails.join(', ')}`,
       add.hrNames.length && `HR name ${add.hrNames.join(', ')}`,
       add.hrProfiles.length && `profile ${add.hrProfiles.join(', ')}`,
+      addsContacts && `found by ${HR_SOURCES[body.foundBy]}`,
       add.students.length && `student ${add.students.join(', ')}`,
       note && `note "${note}"`,
     ].filter(Boolean);
     if (!parts.length) return { error: 'Nothing to add.' };
     const summary = `Add to ${job.title}${job.company ? ` at ${job.company}` : ''}: ${parts.join('; ')}`;
-    ctx.actions.push({ type: 'add-hr-details', summary, payload: { jobId: String(job._id), add, note } });
+    ctx.actions.push({ type: 'add-hr-details', summary, payload: { jobId: String(job._id), add, note, foundBy } });
     return { proposed: true, summary, next: 'Tell the person to check the card and click Confirm. Nothing is saved until they do.' };
   },
 
@@ -573,10 +578,11 @@ const RUN = {
 
 // A job's typed-in details as the follow-up PUT takes them, with these added (lists merged, the note
 // added on a new line). Rebuilt from the job as it is when a change is confirmed.
-export function hrDetailsBody(job, add, note) {
+export function hrDetailsBody(job, add, note, foundBy = '') {
   const c = contactView(job);
   const merge = (list, extra) => [...list, ...extra.filter((v) => !list.some((x) => x.toLowerCase() === String(v).toLowerCase()))];
   return {
+    foundBy: foundBy || c.foundBy, // the one chosen now, else the one stored
     hrName: merge(c.hrNames, add.hrNames ?? []),
     hrProfile: merge(c.hrProfiles, add.hrProfiles ?? []),
     phone: merge(split(c.phone), add.phones ?? []),
@@ -608,7 +614,7 @@ export async function runTool(call, ctx) {
 export async function doAction(action, person) {
   if (action.type === 'add-hr-details') {
     const job = await findJob(action.payload.jobId);
-    const body = hrDetailsBody(job, action.payload.add, action.payload.note);
+    const body = hrDetailsBody(job, action.payload.add, action.payload.note, action.payload.foundBy);
     return callRoute('PUT', '/jobs/:id/follow-up', { params: { id: action.payload.jobId }, body, person, via: 'ai' });
   }
   if (action.type === 'set-follow-up') return callRoute('PUT', '/outcomes', { body: action.payload, person, via: 'ai' });

@@ -36,6 +36,7 @@ const jobSchema = new mongoose.Schema(
         {
           hrNames: { type: [String], default: undefined }, // the HR people's names
           hrProfiles: { type: [String], default: undefined }, // links to their profiles (e.g. LinkedIn)
+          foundBy: String, // where the HR contact was found: signalhire | apollo | linkedin | naukri | indeed (followUp.js HR_SOURCES)
           phone: String,
           phoneKeys: { type: [String], default: undefined },
           email: String,

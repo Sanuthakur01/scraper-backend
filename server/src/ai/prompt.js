@@ -21,7 +21,9 @@ export function describePage(context = {}) {
           ? 'Hiring partners'
           : path.startsWith('/sre')
             ? 'the SRE Openings page (Site Reliability Engineer openings)'
-            : path.startsWith('/review')
+            : path.startsWith('/servicenow')
+              ? 'the ServiceNow Openings page (openings with ServiceNow in the job title)'
+              : path.startsWith('/review')
               ? 'the Review board (HR numbers given to students, the feedback on the calls, and how good the contacts are)'
               : path.startsWith('/assign')
                 ? 'the Assign numbers page (HR numbers and emails no student has yet, to give to students)'

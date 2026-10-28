@@ -6,6 +6,7 @@
 // removed and added again; the field then shows as edited with its old and new spelling.
 
 import { phoneKey } from './normalize.js';
+import { HR_SOURCES } from './api/followUp.js';
 
 const split = (value) => String(value ?? '').split(/\s*,\s*/).filter(Boolean);
 
@@ -15,6 +16,7 @@ const FIELDS = [
   { field: 'hrProfile', values: (c) => c.hrProfiles ?? [], key: (v) => v.toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/\/+$/, '') },
   { field: 'phone', values: (c) => split(c.phone), key: (v) => phoneKey(v) || v },
   { field: 'email', values: (c) => split(c.email), key: (v) => v.toLowerCase() },
+  { field: 'foundBy', values: (c) => (c.foundBy ? [HR_SOURCES[c.foundBy] ?? c.foundBy] : []), key: (v) => v },
   { field: 'assignedTo', values: (c) => c.assignedTo ?? [], key: (v) => v.toLowerCase() },
   { field: 'remarks', values: (c) => (c.remarks ? [c.remarks] : []), key: (v) => v },
 ];
@@ -29,7 +31,7 @@ export function contactChanges(before, after) {
     if (was.join('\n') === now.join('\n')) continue;
     const wasKeys = new Set(was.map(key));
     const nowKeys = new Set(now.map(key));
-    const list = field !== 'remarks';
+    const list = field !== 'remarks' && field !== 'foundBy'; // one value: before -> after
     changes.push({
       field,
       change: !was.length ? 'added' : !now.length ? 'removed' : 'edited',

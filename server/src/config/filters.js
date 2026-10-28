@@ -13,6 +13,7 @@ export const EXCLUDED_COMPANIES = [
   'TCS', 'Infosys', 'IBM', 'Wipro', 'Accenture', 'Cognizant', 'HCL', 'Tech Mahindra', 'Capgemini',
   'LTIMindtree', 'Genpact', 'Tata Consultancy Services', 'CTS', 'HCLTech', 'LTI', 'Mindtree',
   'Teleperformance', 'Sutherland',
+  'LTM', // LTIMindtree's newer name in job posts
 ];
 
 const excludedKeys = [...new Set(EXCLUDED_COMPANIES.map(companyKey))];

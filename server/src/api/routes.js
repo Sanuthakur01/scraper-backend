@@ -11,7 +11,9 @@ import { requirePermission } from '../auth.js';
 import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
-import { MAX_STUDENTS, PHONE_EXISTS, contactView, findPhoneOwner, jobRow, manualRecord, parseFollowUpInput } from './followUp.js';
+import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, jobRow, manualRecord, MAX_STUDENTS, parseFollowUpInput, PHONE_EXISTS } from './followUp.js';
+// The HR contact details "Found by" is about (activity.js field names).
+const CONTACT_DETAILS = ['hrName', 'hrProfile', 'phone', 'email'];
 import { searchEverything } from './search.js';
 import { AllJobs } from './allJobs.js';
 import { ROLE_BOXES, roleTitleQuery } from '../config/roleBoxes.js';
@@ -750,11 +752,17 @@ router.put('/jobs/:id/follow-up', requirePermission('edit-hr-details'), express.
   }
 
   const now = new Date();
-  const record = manualRecord(input.value, now);
+  // Found by: the one chosen, else the one stored. Adding or changing HR contact details needs one; saving only
+  // notes or students doesn't (older contacts may have none).
+  const record = manualRecord({ ...input.value, foundBy: input.value.foundBy || current.manual?.foundBy || '' }, now);
   const update = record ? { $set: { manual: record } } : { $unset: { manual: 1 } };
 
   // What the dashboard shows before and after this save; nothing changed (e.g. saved as it was): no record.
   const changes = contactChanges(contactView(current), contactView({ ...current, manual: record ?? undefined }));
+  const contactsChanged = changes.some((c) => CONTACT_DETAILS.includes(c.field));
+  if (contactsChanged && (record?.hrNames || record?.hrProfiles || record?.phone || record?.email) && !record.foundBy) {
+    return res.status(400).json({ error: FOUND_BY_REQUIRED });
+  }
   // The record is written first, so a change is never saved without one. If the save then fails, the
   // record goes again.
   const entry = changes.length
@@ -837,7 +845,8 @@ router.get('/activity', requirePermission('view'), wrap(async (req, res) => {
 // ---------- Performance report ----------
 
 // Who added how many HR contact details (phone numbers and emails) in a period, from the activity
-// record: one row per number or email a person added, with when and on which job. A number only
+// record: one row per number or email a person added, with when, on which job and where it was found
+// (Found by). A number only
 // written differently, or one the job's posting already had, isn't one (see activity.js). The
 // dashboard groups the rows person → course → company → job. Signed-in people with an allowed role.
 const CONTACT_FIELDS = ['phone', 'email'];
@@ -873,13 +882,29 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
     Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean(),
   ]);
   const shown = rows.slice(0, MAX_PERFORMANCE_ROWS);
+  const jobIds = [...new Map(shown.map((r) => [String(r.job.id), r.job.id])).values()];
+  const [outcomeDocs, sourceRecords] = await Promise.all([
+    ContactOutcome.find({ job: { $in: jobIds.map(String) } }).sort({ _id: 1 }).lean(),
+    Activity.find({ 'job.id': { $in: jobIds }, at: { $lt: range.end }, 'changes.field': 'foundBy' }, { at: 1, 'job.id': 1, changes: 1 }).sort({ at: 1, _id: 1 }).lean(),
+  ]);
   // Each number/email's follow-ups (the students it was given to, how each call went; the first given first):
   // the same for every row of it.
   const outcomesOf = new Map();
-  for (const o of await ContactOutcome.find({ job: { $in: [...new Set(shown.map((r) => String(r.job.id)))] } }).sort({ _id: 1 }).lean()) {
+  for (const o of outcomeDocs) {
     const id = `${o.job}|${o.field}|${o.key}`;
     outcomesOf.set(id, [...(outcomesOf.get(id) ?? []), outcomeView(o)]);
   }
+  // Where each number/email was found ("Found by", one per job): the job's source as it stood when it was
+  // added, from the record that added it or the latest one before that set it ('' = none: added before
+  // Found by was asked for, 28 Oct 2026).
+  const sourcesOf = new Map();
+  for (const record of sourceRecords) {
+    const change = record.changes.find((c) => c.field === 'foundBy');
+    const list = sourcesOf.get(String(record.job.id)) ?? [];
+    list.push({ at: record.at, source: change?.after?.[0] ?? '' });
+    sourcesOf.set(String(record.job.id), list);
+  }
+  const foundByOf = (row) => (sourcesOf.get(String(row.job.id)) ?? []).filter((s) => s.at <= row.at).at(-1)?.source ?? '';
   res.json({
     days: range.days,
     from: range.from,
@@ -888,7 +913,7 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
     rows: shown.map((row) => {
       const key = contactKey(row.field, row.value);
       const outcomes = outcomesOf.get(`${row.job.id}|${row.field}|${key}`) ?? [];
-      return { ...row, key, outcomes, outcome: firstOutcome(outcomes) };
+      return { ...row, key, outcomes, outcome: firstOutcome(outcomes), foundBy: foundByOf(row) };
     }),
     truncated: rows.length > MAX_PERFORMANCE_ROWS,
     students: await knownStudents(), // names to suggest when assigning

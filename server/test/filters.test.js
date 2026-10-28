@@ -21,14 +21,14 @@ test('big IT services firms are excluded under the names platforms use for them'
     'TCS', 'Tata Consultancy Services', 'Tata Consultancy Services Ltd.', 'Infosys', 'Infosys BPM', 'Infosys Limited',
     'IBM', 'IBM India Pvt Ltd', 'International Business Machines', 'Wipro Limited', 'Accenture in India',
     'Cognizant Technology Solutions', 'HCLTech', 'HCL Technologies', 'Tech Mahindra', 'Capgemini Technology Services India',
-    'LTIMindtree', 'Genpact India Pvt. Ltd.',
+    'LTIMindtree', 'Genpact India Pvt. Ltd.', 'LTM', 'LTM Limited',
   ]) {
     assert.ok(isExcludedCompany(name), name);
   }
 });
 
 test('other companies are kept, including ones whose names merely start like an excluded one', () => {
-  for (const name of ['Citi', 'Deloitte', 'Infopie Business Solutions', 'Ibmetrics Analytics', 'Wiproxy Labs', 'Microchip Technology', '']) {
+  for (const name of ['Citi', 'Deloitte', 'Infopie Business Solutions', 'Ibmetrics Analytics', 'Wiproxy Labs', 'Microchip Technology', 'LTMS Analytics', '']) {
     assert.ok(!isExcludedCompany(name), name);
   }
 });

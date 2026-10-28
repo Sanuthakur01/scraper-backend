@@ -115,7 +115,7 @@ test('an unknown course gives a clear 404', async () => {
 test('HR phone, email and remarks can be typed in for a job, and are shown instead of what the posting says', async () => {
   const [job1, job2] = await Promise.all([Job.findOne({ fingerprint: 'f1' }).lean(), Job.findOne({ fingerprint: 'f2' }).lean()]);
   const put = (id, body) =>
-    fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foundBy: 'linkedin', ...body }) });
   const rows = async () => Object.fromEntries((await (await fetch(`${base}/jobs?days=1`)).json()).items.map((j) => [j._id, j.contact]));
 
   let contact = (await rows())[job2._id];
@@ -161,7 +161,7 @@ test('HR phone, email and remarks can be typed in for a job, and are shown inste
 test('a phone number already on another job is refused with "This number already exists."', async () => {
   const [job1, job2, job3] = await Promise.all(['f1', 'f2', 'f3'].map((f) => Job.findOne({ fingerprint: f }).lean()));
   const put = (id, body) =>
-    fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foundBy: 'linkedin', ...body }) });
   // Job 2: +91 70000 12345 typed in; its posting says +91 98450 12345.
   assert.equal((await put(job2._id, { phone: '+91 70000 12345' })).status, 200);
 
@@ -221,7 +221,7 @@ test('a job can be assigned to several students: saved, shown, searched, in the 
 
   const job1 = await Job.findOne({ fingerprint: 'f1' }).lean();
   const put = (body) =>
-    fetch(`${base}/jobs/${job1._id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    fetch(`${base}/jobs/${job1._id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foundBy: 'linkedin', ...body }) });
   const list = async (q = '') => (await fetch(`${base}/jobs?days=1&limit=100${q}`)).json();
   const before = (await list()).withContact;
 
@@ -279,7 +279,7 @@ test('HR names and profile links: checked, saved, shown, searched, in the CSV an
   assert.match(csv.split('\r\n')[1], /,Riya Sharma,https:\/\/linkedin\.com\/in\/riya-sharma,/);
 
   const [entry] = await Activity.find().sort({ at: -1 }).limit(1).lean();
-  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added]), [['hrName', 'added', ['Riya Sharma']], ['hrProfile', 'added', ['https://linkedin.com/in/riya-sharma']]]);
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added]), [['hrName', 'added', ['Riya Sharma']], ['hrProfile', 'added', ['https://linkedin.com/in/riya-sharma']], ['foundBy', 'added', []]]);
   const perf = await (await fetch(`${base}/performance?days=1`)).json();
   assert.ok(perf.rows.every((r) => r.field === 'phone' || r.field === 'email'), 'the performance report counts phone numbers and emails only');
 
@@ -292,7 +292,7 @@ test('HR names and profile links: checked, saved, shown, searched, in the CSV an
 test('a second number already on another job is refused, naming that number', async () => {
   const [job1, job2] = await Promise.all(['f1', 'f2'].map((f) => Job.findOne({ fingerprint: f }).lean()));
   const put = (id, body) =>
-    fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foundBy: 'linkedin', ...body }) });
   assert.equal((await put(job2._id, { phone: ['+91 70000 12345'] })).status, 200);
   const res = await put(job1._id, { phone: ['93333 44444', '70000 12345'] });
   assert.equal(res.status, 409);
@@ -339,7 +339,7 @@ test('every skill a course teaches is one the collector looks for', () => {
 });
 
 const putFollowUp = (id, body) =>
-  fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foundBy: 'linkedin', ...body }) });
 
 test('the 7-day comparison appears only once every day of both weeks was collected', async () => {
   const now = Date.now();
@@ -565,7 +565,7 @@ test('the Non-filtered view shows only the non-filtered jobs, and the Filtered v
     assert.ok(!before.at(-1).items.some((j) => ids.has(j._id)), 'none of them in the Filtered list');
 
     // HR details can be typed into a non-filtered job, and a number is never on two jobs across both views.
-    const put = (id, body) => fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const put = (id, body) => fetch(`${base}/jobs/${id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ foundBy: 'linkedin', ...body }) });
     const saved = await put(docs[0]._id, { phone: '97000 11111', email: '', remarks: 'Non-filtered' });
     assert.equal(saved.status, 200);
     assert.equal((await saved.json()).contact.remarks, 'Non-filtered');
@@ -783,7 +783,7 @@ const putAs = (id, body, auth) =>
   fetch(`${base}/jobs/${id}/follow-up`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: `Bearer ${auth}` } : {}) },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ foundBy: 'linkedin', ...body }),
   });
 const empty = { phone: [], email: [], assignedTo: [], remarks: '' };
 
@@ -799,7 +799,7 @@ test('every change to HR details is recorded: who (email), which job, and what w
   assert.deepEqual(entry.actor, { userId: 'user_riya@example.com', email: 'riya@example.com', name: '', role: 'PLACEMENT_STAFF' });
   assert.equal(entry.action, 'added');
   assert.deepEqual({ id: String(entry.job.id), set: entry.job.set, title: entry.job.title }, { id: String(job._id), set: 'filtered', title: job.title });
-  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added]), [['phone', 'added', ['93456 70011']], ['email', 'added', ['hr@acme.in']]]);
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.added]), [['phone', 'added', ['93456 70011']], ['email', 'added', ['hr@acme.in']], ['foundBy', 'added', []]]);
 
   // Edited: a second number, the email removed, a student and a note added.
   await putAs(job._id, { phone: ['93456 70011', '080 5555 0101'], email: [], assignedTo: ['Riya Sharma'], remarks: 'Called HR' }, 'ADMIN:aman@example.com');
@@ -822,7 +822,7 @@ test('every change to HR details is recorded: who (email), which job, and what w
   await putAs(job._id, empty, riya);
   [entry] = await Activity.find().sort({ at: -1 }).lean();
   assert.equal(entry.action, 'removed');
-  assert.deepEqual(entry.changes.map((c) => c.field).sort(), ['assignedTo', 'phone', 'remarks']);
+  assert.deepEqual(entry.changes.map((c) => c.field).sort(), ['assignedTo', 'foundBy', 'phone', 'remarks'], 'with the contacts, where they were found goes too');
 
   // Reading the record: newest first, by job, by person, page by page.
   const get = async (q, auth) => fetch(`${base}/activity?${q}`, auth ? { headers: { Authorization: `Bearer ${auth}` } } : {});
@@ -862,7 +862,7 @@ test('the server accepts changes only from a Clerk sign-in with an allowed role,
       fetch(`${api}/jobs/${job._id}/follow-up`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...(auth ? { Authorization: auth } : {}) },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ foundBy: 'linkedin', ...body }),
       });
     const before = await Activity.countDocuments();
     const body = { ...empty, remarks: 'From the test', actor: { email: 'someone-else@example.com' } };
@@ -1064,6 +1064,7 @@ test('performance report: each phone number and email a person added, once, with
     ['riya@example.com', 'phone', '93456 70023', job4.title, 'data-science'],
   ]);
   assert.ok(body.rows.every((r) => r.at && r.record && String(r.job.id) && r.actor.role), 'when, which change, which job, their role');
+  assert.ok(body.rows.every((r) => r.foundBy === 'LinkedIn'), 'where each was found (Found by)');
   assert.ok(Date.parse(body.rows[0].at) >= Date.parse(body.rows.at(-1).at), 'newest first');
   assert.ok(body.since, 'says when the activity record began');
   assert.equal(body.truncated, false);
@@ -1505,4 +1506,63 @@ test('review board: each number with each student it was given to (or with feedb
     await Activity.deleteMany({ 'job.id': job._id });
     await ContactOutcome.deleteMany({ job: job._id });
   }
+});
+
+test('Found by: needed when HR contact details are added or changed, one of the list; notes and students alone need none', async () => {
+  const job = await Job.create({ fingerprint: 'found-by-1', title: 'Found By Analyst', company: 'Source Co', course: 'data-analyst', firstSeenAt: new Date(), lastSeenAt: new Date(), sourceKeys: ['FB:1'], primaryPlatform: 'Naukri', platforms: ['Naukri'] });
+  const put = (body) => fetch(`${base}/jobs/${job._id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let res = await put({ phone: ['93456 79001'] });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /^Found by: choose where the HR contact was found \(SignalHire, Apollo, LinkedIn, Naukri, Indeed\)/);
+  assert.equal((await Job.findById(job._id).lean()).manual, undefined, 'refused: nothing saved');
+  res = await put({ phone: ['93456 79001'], foundBy: 'google' });
+  assert.match((await res.json()).error, /^Found by: "google" is not one of SignalHire, Apollo, LinkedIn, Naukri, Indeed/);
+
+  res = await put({ phone: ['93456 79001'], foundBy: 'Apollo' });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).contact.foundBy, 'apollo', 'stored and shown');
+  let [entry] = await Activity.find({ 'job.id': job._id }).sort({ at: -1 }).limit(1).lean();
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.after]), [['phone', 'added', ['93456 79001']], ['foundBy', 'added', ['Apollo']]]);
+
+  // A note or a student alone, sent without it: fine, and the one stored stays.
+  res = await put({ phone: ['93456 79001'], remarks: 'Call after 5', assignedTo: ['Riya'] });
+  assert.equal(res.status, 200);
+  assert.equal((await Job.findById(job._id).lean()).manual.foundBy, 'apollo');
+  // Another number, without saying: the stored one counts; then changed to SignalHire (recorded).
+  assert.equal((await put({ phone: ['93456 79001', '93456 79002'] })).status, 200);
+  res = await put({ phone: ['93456 79001', '93456 79002'], foundBy: 'signalhire' });
+  [entry] = await Activity.find({ 'job.id': job._id }).sort({ at: -1 }).limit(1).lean();
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.before, c.after]), [['foundBy', 'edited', ['Apollo'], ['SignalHire']]]);
+
+  // An older job with contacts and no source: notes can be saved; a new contact needs it.
+  await Job.updateOne({ _id: job._id }, { $unset: { 'manual.foundBy': 1 } });
+  assert.equal((await put({ phone: ['93456 79001', '93456 79002'], remarks: 'Only the note' })).status, 200);
+  assert.equal((await put({ phone: ['93456 79001', '93456 79002'], email: ['hr@source.example'] })).status, 400);
+  // Contacts removed: none needed, none kept.
+  assert.equal((await put({ remarks: 'Only the note' })).status, 200);
+  assert.equal((await Job.findById(job._id).lean()).manual.foundBy, undefined);
+  await Job.deleteOne({ _id: job._id });
+});
+
+test('performance report: where each number and email was found, as the Found by of its job when it was added', async () => {
+  const job = await Job.create({ fingerprint: 'perf-found-by', title: 'Source Analyst', company: 'Found Co', course: 'data-analyst', firstSeenAt: new Date(), lastSeenAt: new Date(), sourceKeys: ['PF:1'], primaryPlatform: 'Naukri', platforms: ['Naukri'] });
+  const put = (body) => fetch(`${base}/jobs/${job._id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  // One added before Found by was asked for: its record says nothing about the source.
+  await Activity.create({
+    at: new Date(Date.now() - 60_000),
+    actor: { userId: 'u_old', email: 'old@example.com', role: 'ADMIN' },
+    action: 'added',
+    job: { id: job._id, set: 'filtered', title: job.title, company: job.company, course: job.course },
+    changes: [{ field: 'phone', change: 'added', before: [], after: ['93456 79100'], added: ['93456 79100'], removed: [] }],
+  });
+  await Job.updateOne({ _id: job._id }, { $set: { manual: { phone: '93456 79100' } } });
+  // Then: a number found on Apollo; another with the stored source kept; a third once it was SignalHire.
+  assert.equal((await put({ phone: ['93456 79100', '93456 79101'], foundBy: 'apollo' })).status, 200);
+  assert.equal((await put({ phone: ['93456 79100', '93456 79101', '93456 79102'] })).status, 200);
+  assert.equal((await put({ phone: ['93456 79100', '93456 79101', '93456 79102', '93456 79103'], foundBy: 'signalhire' })).status, 200);
+
+  const report = await (await fetch(`${base}/performance?days=1`)).json();
+  const sourceOf = Object.fromEntries(report.rows.filter((r) => String(r.job.id) === String(job._id)).map((r) => [r.value, r.foundBy]));
+  assert.deepEqual(sourceOf, { '93456 79100': '', '93456 79101': 'Apollo', '93456 79102': 'Apollo', '93456 79103': 'SignalHire' });
+  await Promise.all([Job.deleteOne({ _id: job._id }), Activity.deleteMany({ 'job.id': job._id })]);
 });
