@@ -70,7 +70,7 @@ test('each platform is saved as soon as it finishes, without waiting for slower 
   assert.equal(await Job.countDocuments(), 3);
 });
 
-test('big companies and jobs asking under 2 years are left out (5+ years are kept); a job without stated experience is kept only when it matches one', async () => {
+test('big companies, fresher jobs and jobs asking for more than 5 years are left out; a job without stated experience is kept only when it matches one', async () => {
   const tcs = naukriJob('N7', 'Data Engineer', 'Tata Consultancy Services');
   const junior = { ...naukriJob('N8', 'Data Scientist', 'Delta'), minimumExperience: '0', maximumExperience: '2' };
   const senior = { ...naukriJob('N9', 'Data Scientist', 'Gamma'), minimumExperience: '8', maximumExperience: '12' };
@@ -86,8 +86,9 @@ test('big companies and jobs asking under 2 years are left out (5+ years are kep
     rawDir: null,
   });
   const jobs = await Job.find().lean();
-  assert.deepEqual(jobs.map((j) => j.company).sort(), ['Alpha', 'Beta', 'Gamma'], 'no TCS, no 0-2 year job, no lone job without experience');
-  assert.equal(jobs.find((j) => j.company === 'Gamma').experienceBand, '5+', 'an 8-12 year job is kept, in the 5+ (more than 5) group');
+  assert.deepEqual(jobs.map((j) => j.company).sort(), ['Alpha', 'Beta'], 'no TCS, no 0-2 year job, no 8-12 year job, no lone job without experience');
+  const gamma = await NonFilteredJob.findOne({ company: 'Gamma' }).lean();
+  assert.deepEqual([gamma?.leftOutBy, gamma?.experienceBand], ['senior', '5+'], 'the 8-12 year job is Non-filtered, as "5+ years"');
   assert.deepEqual([...jobs.find((j) => j.company === 'Alpha').platforms].sort(), ['Indeed', 'Naukri'], 'the Indeed listing joined the matching job');
   assert.ok(run.totals.bigCompany >= 1 && run.totals.outsideExperience >= 1);
   assert.equal(run.totals.noExperience, 2);

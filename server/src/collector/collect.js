@@ -333,7 +333,7 @@ async function savePlatform(searches, pool, now, log, summary, waiting, leftOut)
       if (search.extra) {
         counts.extraSearch++;
         leftOut.push({ ...listingFromJob(result.job), fromExtraSearch: true });
-      } else if (result.skip === 'big-company' || result.skip === 'experience') {
+      } else if (result.skip === 'big-company' || result.skip === 'experience' || result.skip === 'senior') {
         counts[result.skip === 'big-company' ? 'bigCompany' : 'outsideExperience']++;
         leftOut.push(listingFromJob(result.job));
       } else if (result.job.experienceUnknown) {

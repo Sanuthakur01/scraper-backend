@@ -49,7 +49,8 @@ const jobSchema = new mongoose.Schema(
       default: undefined,
     },
     // NonFilteredJob only: why the keep rules leave it out: 'big-company' | 'experience' (under the
-    // minimum) | 'no-experience' (not stated, and not the same job as a kept one). See leftOutReason.
+    // minimum) | 'senior' (over the maximum: 5+ years) | 'no-experience' (not stated, and not the same job as a
+    // kept one). See leftOutReason.
     leftOutBy: String,
     // NonFilteredJob only: one of a course's extra searches (extraSearchTerms) found it, and no main search
     // kept it (else it would be a kept job). Such a job that passes the keep rules has leftOutBy 'extra-search'.

@@ -23,19 +23,21 @@ export function isExcludedCompany(name) {
   return Boolean(key) && excludedKeys.some((excluded) => key === excluded || key.startsWith(`${excluded} `));
 }
 
-// The minimum experience a job asks for must be at least EXPERIENCE_MIN years (default 1), and at most
-// EXPERIENCE_MAX when that is set (no upper limit by default): "1-3 yrs", "1-5 yrs", "3-6 yrs" and "8+ yrs"
-// are kept; fresher jobs ("0-2 yrs", "Fresher") are not.
+// The minimum experience a job asks for must be at least EXPERIENCE_MIN years (default 1) and at most
+// EXPERIENCE_MAX (default 5, since 30 Oct 2026; none before): "1-3 yrs", "1-5 yrs", "3-6 yrs" and "5-8 yrs" are
+// kept; fresher jobs ("0-2 yrs", "Fresher") and those asking for more than 5 years ("6-10 yrs", "8+ yrs") are not.
 export const experienceInRange = (min) =>
   min != null && min >= config.experience.min && (config.experience.max == null || min <= config.experience.max);
+
+// A stated minimum outside the range: 'experience' (under it: freshers) or 'senior' (over it: 5+ years).
+export const experienceReason = (min) => (min == null || experienceInRange(min) ? null : min < config.experience.min ? 'experience' : 'senior');
 
 // Why a job that fits a course is left out (a non-filtered job), from its details: the rules above, in
 // the order buildJob checks them. null = it passes them (a kept, filtered job).
 export function leftOutReason({ company, experienceMin }) {
   if (isExcludedCompany(company)) return 'big-company';
   if (experienceMin == null) return 'no-experience';
-  if (!experienceInRange(experienceMin)) return 'experience';
-  return null;
+  return experienceReason(experienceMin);
 }
 
 // A non-filtered job's leftOutBy: what the keep rules say, else 'extra-search' when it passes them but an
@@ -46,6 +48,8 @@ export const nonFilteredReason = (job) => leftOutReason(job) ?? (job.fromExtraSe
 // the fresher jobs.
 export const underExperienceText = () =>
   config.experience.min <= 1 ? 'Fresher (asks for no experience)' : `Asks for under ${config.experience.min} years`;
+// leftOutBy 'senior' in words: the jobs asking for more than EXPERIENCE_MAX years.
+export const overExperienceText = () => `Asks for more than ${config.experience.max} years`;
 
 // "1+" (no upper limit) or "1-5", for messages.
 export const experienceRangeText = () =>

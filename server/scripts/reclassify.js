@@ -17,9 +17,9 @@ try {
   const { counts: c, examples } = await reclassifyJobs({ dryRun });
   const would = dryRun ? 'would ' : '';
   const toNonFiltered = Object.values(c.toNonFiltered).reduce((a, b) => a + b, 0);
-  console.log(`${dryRun ? 'Dry run: ' : ''}rules: excluded companies, at least ${experienceRangeText()} years' experience, a course match.`);
+  console.log(`${dryRun ? 'Dry run: ' : ''}rules: excluded companies, ${experienceRangeText()} years' experience, a course match.`);
   console.log(`  Filtered (kept) jobs: ${c.kept} stay; ${toNonFiltered} ${would}move to Non-filtered` +
-    `${toNonFiltered ? ` (${c.toNonFiltered['big-company']} big company, ${c.toNonFiltered.experience} under the minimum experience, ` +
+    `${toNonFiltered ? ` (${c.toNonFiltered['big-company']} big company, ${c.toNonFiltered.experience} under the minimum experience, ${c.toNonFiltered.senior} over the maximum, ` +
       `${c.toNonFiltered['no-experience']} experience not stated)` : ''}${examples.toNonFiltered.length ? `, e.g. ${examples.toNonFiltered.join('; ')}` : ''}`);
   console.log(`  Non-filtered jobs: ${c.nonFiltered} stay; ${c.toKept} ${would}move to Filtered${examples.toKept.length ? `, e.g. ${examples.toKept.join('; ')}` : ''}`);
   console.log(`  ${c.noCourse} jobs that no longer match any course ${would}${dryRun ? 'be ' : ''}removed.`);

@@ -164,6 +164,17 @@ function sheetProblem(status, body, serviceAccount) {
   return `Google Sheets answered ${status}: ${message || 'no details'}`;
 }
 
+// The settings the sheet needs that are empty, by name (never their values): what the "not connected" message names.
+export function missingSettings({ sheetId, serviceAccount, privateKey }) {
+  return [
+    [serviceAccount, 'GOOGLE_SERVICE_ACCOUNT_EMAIL'],
+    [privateKey, 'GOOGLE_PRIVATE_KEY'],
+    [sheetId, 'INTERVIEWS_SHEET_ID'],
+  ]
+    .filter(([value]) => !value)
+    .map(([, name]) => name);
+}
+
 // Reads the interview sheet, at most every READ_EVERY_MS (callers in between share the last reading, and one
 // reading in progress). A failed reading keeps the last good interviews and says why (error). null when the
 // sheet or the service account isn't set up.

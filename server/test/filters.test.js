@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildJob } from '../src/collector/buildJob.js';
-import { experienceInRange, isExcludedCompany } from '../src/config/filters.js';
+import { experienceInRange, experienceReason, isExcludedCompany } from '../src/config/filters.js';
 import { SOURCES } from '../src/config/sources.js';
 
 const naukri = SOURCES.find((s) => s.platform === 'Naukri');
@@ -33,8 +33,9 @@ test('other companies are kept, including ones whose names merely start like an 
   }
 });
 
-test('experience: the minimum asked must be at least 1 year (fresher jobs are left out), with no upper limit', () => {
-  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 10, null].map(experienceInRange), [false, true, true, true, true, true, true, true, false]);
+test('experience: the minimum asked must be 1 to 5 years (fresher jobs and 5+ year jobs are left out)', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 10, null].map(experienceInRange), [false, true, true, true, true, true, false, false, false]);
+  assert.deepEqual([0, 1, 5, 6, 10, null].map(experienceReason), ['experience', null, null, 'senior', 'senior', null]);
 });
 
 test('jobs are checked before saving', () => {
@@ -45,7 +46,8 @@ test('jobs are checked before saving', () => {
   assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 0, 2), now).skip, 'experience', '0-2 yrs: a fresher job');
   assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 3), now).job?.experienceBand, '1', '1-3 yrs is kept, in the 1 yr group');
   assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 5), now).skip, undefined, '1-5 yrs is kept');
-  assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 6, 9), now).job?.experienceBand, '5+', '6-9 yrs is kept, in the 5+ (more than 5) group');
+  const senior = buildJob(naukri, naukriItem('Alpha Analytics', 6, 9), now);
+  assert.deepEqual([senior.skip, senior.job?.experienceBand], ['senior', '5+'], '6-9 yrs (more than 5): left out, its details come back for Non-filtered');
   assert.ok(buildJob(naukri, naukriItem('Alpha Analytics', 3, 6), now).job, '3-6 yrs is kept');
   assert.ok(buildJob(naukri, naukriItem('Alpha Analytics', 5, 8), now).job, '5-8 yrs is kept');
   const unknown = buildJob(naukri, naukriItem('Alpha Analytics', null, null), now);

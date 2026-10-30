@@ -2,6 +2,7 @@
 // rules (numbers only from tools, no contacts, changes only through Confirm).
 
 import { COURSES } from '../config/courses.js';
+import { config } from '../config.js';
 import { experienceRangeText } from '../config/filters.js';
 import { REMARKS } from '../outcomes.js';
 
@@ -45,7 +46,7 @@ They are on ${describePage(context)}. "This course", "these jobs", "here" mean t
 
 How the dashboard counts:
 - "New jobs" in a period = jobs our collector first found on those days (India time). "Latest day" = the day of the latest collection run.
-- Filtered (the default) = kept jobs: ${experienceRangeText()} years of experience, not from big IT services firms. Non-filtered = jobs those rules leave out (e.g. fresher jobs), and jobs found only by the extra searches (${COURSES.flatMap((c) => c.extraSearchTerms ?? []).join(', ')}). All = both together (each job is in one of the two, so All = Filtered + Non-filtered).
+- Filtered (the default) = kept jobs: ${experienceRangeText()} years of experience, not from big IT services firms. Non-filtered = jobs those rules leave out (e.g. fresher jobs${config.experience.max ? `, jobs asking for more than ${config.experience.max} years` : ''}), and jobs found only by the extra searches (${COURSES.flatMap((c) => c.extraSearchTerms ?? []).join(', ')}). All = both together (each job is in one of the two, so All = Filtered + Non-filtered).
 - A period is compared with the same number of days just before only when collection ran on every one of those days.
 - HR details of a job: HR names, HR profile links, phone numbers, emails (typed in by the team, or found in the job post), the students it is assigned to, and notes.
 - Performance report: each HR phone number/email a staff member added (counted once), and its follow-up: the student it was given to and a remark (${Object.values(REMARKS).join(', ')}). Its days end today.

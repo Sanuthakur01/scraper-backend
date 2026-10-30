@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import express from 'express';
 import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
-import { EXCLUDED_COMPANIES, underExperienceText } from '../config/filters.js';
+import { EXCLUDED_COMPANIES, overExperienceText, underExperienceText } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
 import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob, STUDENT_COLLATION } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
@@ -17,8 +17,10 @@ const CONTACT_DETAILS = ['hrName', 'hrProfile', 'phone', 'email'];
 import { searchEverything } from './search.js';
 import { AllJobs } from './allJobs.js';
 import { ROLE_BOXES, roleTitleQuery } from '../config/roleBoxes.js';
+import { missingSettings } from '../interviews.js';
 
 const router = express.Router();
+const STARTED_AT = new Date().toISOString(); // when this server started: settings added after it need a restart
 
 // Every route's handler, by "GET /summary", so IJF AI's tools can run the same code in-process (src/ai/
 // tools.js: callRoute) and always give the same numbers as the dashboard.
@@ -704,11 +706,18 @@ router.get('/jobs', wrap(async (req, res) => {
   const page = clampDays(req.query.page, 1, 100_000);
   // withContact: how many of these jobs have HR details (HAS_HR_DETAILS).
   const hasContact = HAS_HR_DETAILS;
-  const [items, total, withContact] = await Promise.all([
+  let [items, total, withContact] = await Promise.all([
     J.find(filter, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
     J.countDocuments(filter),
     J.countDocuments({ $and: [filter, hasContact] }),
   ]);
+  // One job by id (opened from the activity record or a report, which name the set it was in then) that the
+  // rules have moved to the other set since (e.g. the 5+ year jobs on 30 Oct 2026): found there.
+  if (req.query.id && !items.length && J !== AllJobs) {
+    items = await (J === Job ? NonFilteredJob : Job).find(filter, JOB_FIELDS).limit(1).lean();
+    total = items.length;
+    withContact = items.filter((job) => job.manual || job.foundPhones?.length || job.foundEmails?.length).length;
+  }
   res.json({
     days,
     anchor: range.anchor,
@@ -1065,7 +1074,11 @@ router.get('/interviews', requirePermission('view'), wrap(async (req, res) => {
   const range = activityRange(req.query);
   const period = { days: range.days, from: range.from, to: range.to };
   const source = req.app.locals.interviews;
-  if (!source) return res.json({ ...period, configured: false, items: [], readAt: null, error: null });
+  // Not set up: which settings this server is missing (names only) and when it started, so whoever set them can
+  // tell a typo from a server not restarted since.
+  if (!source) {
+    return res.json({ ...period, configured: false, missing: missingSettings(config.interviews), startedAt: STARTED_AT, items: [], readAt: null, error: null });
+  }
   const sheet = await source.read();
   if (sheet.error && !sheet.readAt) return res.status(503).json({ error: `Could not read the interview sheet. ${sheet.error}` });
   const items = sheet.items
@@ -1207,6 +1220,7 @@ const contactValue = (manual) => ({
 const LEFT_OUT_REASONS = {
   'big-company': 'Large IT services firm',
   experience: underExperienceText(),
+  senior: overExperienceText(),
   'no-experience': 'Experience not stated',
   'extra-search': 'From the extra searches',
 };

@@ -145,7 +145,7 @@ test('reclassify moves jobs between the two sets when the rules change, losing n
   assert.equal(await Job.countDocuments(), 2, 'a dry run changes nothing');
 
   const { counts } = await reclassifyJobs();
-  assert.deepEqual(counts.toNonFiltered, { 'big-company': 1, experience: 0, 'no-experience': 0 });
+  assert.deepEqual(counts.toNonFiltered, { 'big-company': 1, experience: 0, senior: 0, 'no-experience': 0 });
   assert.equal(counts.toKept, 1);
   assert.equal(counts.noCourse, 1);
   assert.deepEqual((await Job.find().lean()).map((j) => j.company).sort(), ['Firm 2', 'Firm 3']);

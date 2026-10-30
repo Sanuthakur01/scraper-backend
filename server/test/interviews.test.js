@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { test } from 'node:test';
 import { createApp } from '../src/app.js';
-import { courseOfTab, createInterviewSource, labelCourses, minutesOf, monthOfTab, parseDay, parseInterviews } from '../src/interviews.js';
+import { courseOfTab, createInterviewSource, labelCourses, minutesOf, missingSettings, monthOfTab, parseDay, parseInterviews } from '../src/interviews.js';
 
 // Like the staff's October tab: a block per day, a course row, a header row, "PLACED" after some rows.
 const OCTOBER = [
@@ -202,7 +202,11 @@ test('GET /api/interviews: the period (days end today), latest day first and by 
   assert.equal(body.to, today);
   assert.deepEqual(body.items.map((i) => i.name), ['EARLY ONE', 'LATE ONE', 'ANY TIME']);
   assert.equal(body.readAt, '2026-10-30T06:00:00.000Z');
-  assert.deepEqual((await run(null)).body, { days: 1, from: today, to: today, configured: false, items: [], readAt: null, error: null });
+  const off = (await run(null)).body;
+  assert.deepEqual([off.configured, off.items, off.from, off.to], [false, [], today, today]);
+  assert.ok(Array.isArray(off.missing) && !Number.isNaN(Date.parse(off.startedAt)), 'says which settings are missing and when the server started');
+  assert.deepEqual(missingSettings({ sheetId: 'x', serviceAccount: '', privateKey: '' }), ['GOOGLE_SERVICE_ACCOUNT_EMAIL', 'GOOGLE_PRIVATE_KEY']);
+  assert.deepEqual(missingSettings(SETUP), []);
   const broken = await run({ read: async () => ({ items: [], readAt: null, error: 'The Google Sheets API is switched off.' }) });
   assert.equal(broken.status, 503);
   assert.match(broken.body.error, /^Could not read the interview sheet\. The Google Sheets API is switched off/);

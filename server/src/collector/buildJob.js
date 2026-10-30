@@ -1,5 +1,5 @@
 import { classifyTitle } from '../classify.js';
-import { experienceInRange, isExcludedCompany } from '../config/filters.js';
+import { experienceReason, isExcludedCompany } from '../config/filters.js';
 import {
   cleanText,
   experienceBand,
@@ -65,6 +65,8 @@ export function buildJob(source, rawItem, now) {
     },
   };
   if (bigCompany) return { skip: 'big-company', ...built };
-  if (experience.min != null && !experienceInRange(experience.min)) return { skip: 'experience', ...built };
+  // Under the minimum ('experience': freshers) or over the maximum ('senior': 5+ years).
+  const outside = experienceReason(experience.min);
+  if (outside) return { skip: outside, ...built };
   return built;
 }

@@ -966,6 +966,12 @@ test('the activity list can be filtered (person, kind of change, job) and paged 
   // A record's job can be opened: the job list finds one job by id, whenever it was found.
   const one = await (await fetch(`${base}/jobs?id=${job2._id}&days=1`)).json();
   assert.deepEqual(one.items.map((j) => j._id), [String(job2._id)]);
+  // A job the rules moved to the other set since it was recorded is found there (asked for in either view).
+  const moved = await NonFilteredJob.create({ fingerprint: 'moved-1', title: 'Senior Data Analyst', company: 'Moved Co', course: 'data-analyst', firstSeenAt: new Date(), lastSeenAt: new Date(), sourceKeys: ['MV:1'], primaryPlatform: 'Naukri', platforms: ['Naukri'], experienceMin: 7, leftOutBy: 'senior' });
+  const found = await (await fetch(`${base}/jobs?id=${moved._id}&days=1`)).json();
+  assert.deepEqual([found.items.map((j) => j._id), found.items[0]?.leftOutBy], [[String(moved._id)], 'senior']);
+  assert.equal((await (await fetch(`${base}/jobs?id=${job2._id}&days=1&view=nonfiltered`)).json()).items.length, 1);
+  await NonFilteredJob.deleteOne({ _id: moved._id });
 });
 
 test('a custom period (from–to, IST days, both included) counts exactly the jobs found on those days', async () => {

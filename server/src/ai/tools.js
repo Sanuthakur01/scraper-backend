@@ -4,6 +4,7 @@
 // Nothing here changes data: a change is only proposed (a card with Confirm), and done when confirmed.
 
 import { COURSES } from '../config/courses.js';
+import { config } from '../config.js';
 import { experienceRangeText } from '../config/filters.js';
 import { routeHandlers } from '../api/routes.js';
 import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, HR_SOURCES, parseFollowUpInput, PHONE_EXISTS } from '../api/followUp.js';
@@ -61,7 +62,7 @@ const VIEW = {
   view: {
     type: 'string',
     enum: ['filtered', 'nonfiltered', 'all'],
-    description: `filtered (default): the kept jobs (${experienceRangeText()} years, no big IT services firms). nonfiltered: the jobs those rules leave out (fresher jobs too). all: both together.`,
+    description: `filtered (default): the kept jobs (${experienceRangeText()} years, no big IT services firms). nonfiltered: the jobs those rules leave out (fresher jobs${config.experience.max ? ` and those asking for more than ${config.experience.max} years` : ''} too). all: both together.`,
   },
 };
 const COURSE = { course: { type: 'string', enum: COURSE_IDS, description: `The course: ${COURSES.map((c) => `${c.id} = ${c.name}`).join(', ')}.` } };

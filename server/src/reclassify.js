@@ -15,7 +15,7 @@ export async function reclassifyJobs({ dryRun = false } = {}) {
   const counts = {
     kept: 0, // kept jobs that stay kept
     nonFiltered: 0, // non-filtered jobs that stay non-filtered
-    toNonFiltered: { 'big-company': 0, experience: 0, 'no-experience': 0 }, // kept -> non-filtered, by reason
+    toNonFiltered: { 'big-company': 0, experience: 0, senior: 0, 'no-experience': 0 }, // kept -> non-filtered, by reason
     toKept: 0, // non-filtered -> kept
     noCourse: 0, // removed: fit no course
     keptManual: 0, // fit no course, but kept because HR details were typed in
