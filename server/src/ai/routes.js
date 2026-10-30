@@ -197,7 +197,7 @@ router.get('/chat/briefing', requirePermission('view'), wrap(async (req, res) =>
       chat: { messages: [], secrets },
       question: BRIEFING_REQUEST,
       request: BRIEFING_REQUEST,
-      context: { path: '/', period: { days: 1 } },
+      context: { path: '/dashboard', period: { days: 1 } },
       person: { name: 'the team', role: '' },
       emit: () => {},
     });

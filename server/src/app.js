@@ -7,6 +7,7 @@ import apiRoutes from './api/routes.js';
 import { createClerkIdentify } from './auth.js';
 import { createOpenAi } from './ai/openai.js';
 import aiRoutes from './ai/routes.js';
+import { createInterviewSource } from './interviews.js';
 
 // Optional login: any username, the password from DASHBOARD_PASSWORD.
 function basicAuth(password) {
@@ -41,12 +42,18 @@ function allowOrigins(origins) {
   };
 }
 
-// identify: who sent a request (src/auth.js); by default checked with Clerk. Tests pass their own.
-export function createApp({ identify = createClerkIdentify(config.clerk), ai = config.ai.apiKey ? createOpenAi(config.ai) : null } = {}) {
+// identify: who sent a request (src/auth.js); by default checked with Clerk. Tests pass their own (and their own
+// interview sheet).
+export function createApp({
+  identify = createClerkIdentify(config.clerk),
+  ai = config.ai.apiKey ? createOpenAi(config.ai) : null,
+  interviews = createInterviewSource(config.interviews),
+} = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.locals.identify = identify;
   app.locals.ai = ai; // IJF AI's model call (src/ai/openai.js), null when OPEN_AI_API_KEY isn't set
+  app.locals.interviews = interviews; // the staff's interview sheet (src/interviews.js), null when not set up
 
   // Before the login check, which a browser's preflight request can't pass.
   if (config.corsOrigins.length) app.use('/api', allowOrigins(config.corsOrigins));

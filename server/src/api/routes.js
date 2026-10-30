@@ -1055,6 +1055,25 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
   });
 }));
 
+// ---------- Interviews ----------
+
+// The students' interviews the staff list in their Google Sheet (src/interviews.js), in a period whose days end
+// today (as in the Performance report; ?days= or ?from=&to=): the latest day first, each day by time ("ANYTIME"
+// last). The sheet is read at most every 10 minutes; readAt says when. A reading that failed after a good one
+// keeps the good one's interviews and says why (error); with none to show, 503. Signed-in people only.
+router.get('/interviews', requirePermission('view'), wrap(async (req, res) => {
+  const range = activityRange(req.query);
+  const period = { days: range.days, from: range.from, to: range.to };
+  const source = req.app.locals.interviews;
+  if (!source) return res.json({ ...period, configured: false, items: [], readAt: null, error: null });
+  const sheet = await source.read();
+  if (sheet.error && !sheet.readAt) return res.status(503).json({ error: `Could not read the interview sheet. ${sheet.error}` });
+  const items = sheet.items
+    .filter((item) => item.date >= range.from && item.date <= range.to)
+    .sort((a, b) => b.date.localeCompare(a.date) || (a.minutes ?? 1e9) - (b.minutes ?? 1e9) || a.id.localeCompare(b.id, 'en', { numeric: true }));
+  res.json({ ...period, configured: true, items, readAt: sheet.readAt, error: sheet.error });
+}));
+
 // Every student name used so far (jobs' "Assigned to" lists and the report's assignments), each once, A–Z.
 async function knownStudents() {
   const lists = await Promise.all([Job.distinct('manual.assignedTo'), NonFilteredJob.distinct('manual.assignedTo'), ContactOutcome.distinct('student')]);

@@ -110,6 +110,14 @@ export const config = {
   scheduleLabel:
     process.env.SCHEDULE_LABEL || 'Updated daily at 07:00 IST',
 
+  // The staff's interview sheet (src/interviews.js), read with a Google service account the sheet is shared
+  // with (view only). The key's line breaks are written as \n in .env. Any missing: no Interviews data.
+  interviews: {
+    sheetId: process.env.INTERVIEWS_SHEET_ID ?? '',
+    serviceAccount: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? '',
+    privateKey: (process.env.GOOGLE_PRIVATE_KEY ?? '').replace(/\\n/g, '\n'),
+  },
+
   // IJF AI (the chat, src/ai/): OpenAI, called only from this server, never from the browser. No key:
   // the chat is switched off and the dashboard doesn't show it. dailyLimit: questions per person per
   // IST day (people aren't told the number). model: any OpenAI chat model with tool calling.
