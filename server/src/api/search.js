@@ -107,7 +107,7 @@ async function findContacts(query, fields) {
     .filter((hit) => hit.matches.length)
     .sort((a, b) => at(b) - at(a));
   return {
-    contacts: hits.slice(0, MAX_JOBS).map(({ job, set, matches }) => ({ job: jobRow(job), set, matches })),
+    contacts: hits.slice(0, MAX_JOBS).map(({ job, set, matches }) => ({ job: jobRow(job), set, matches, companyKey: companyKey(job.company) })),
     moreContacts: hits.length > MAX_JOBS,
   };
 }

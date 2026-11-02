@@ -19,7 +19,8 @@ const PAGES = [
   ['/servicenow', 'the ServiceNow Openings page (openings with ServiceNow in the job title)'],
   ['/review', 'the Review board (HR numbers given to students, the feedback on the calls, and how good the contacts are)'],
   ['/assign', 'the Assign numbers page (HR numbers and emails no student has yet, to give to students)'],
-  ['/interviews', "the Interviews page (students' interviews from the staff's interview sheet: company, time, round, room, placed)"],
+  ['/interviews', "the Interviews page (students' interviews from the staff's interview sheet: company, time, round, room; per-course counts; round and rescheduled filters; rescheduled ones are listed but not counted)"],
+  ['/incoming-calls', "the Incoming calls page (HR calls to our students logged by the team: company, HR number, student, course, outcome; whether each company is in our HR database)"],
   ['/cv-shared','the CV shared page (every call that ended in CV shared: the student, the company and job, who found and gave out the number)'],
 ];
 

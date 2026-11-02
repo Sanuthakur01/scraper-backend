@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { test } from 'node:test';
 import { createApp } from '../src/app.js';
-import { courseOfTab, createInterviewSource, labelCourses, minutesOf, missingSettings, monthOfTab, parseDay, parseInterviews } from '../src/interviews.js';
+import { courseOfTab, createInterviewSource, labelCourses, minutesOf, missingSettings, monthOfTab, parseDay, parseInterviews, roundGroupOf } from '../src/interviews.js';
 
 // Like the staff's October tab: a block per day, a course row, a header row, "PLACED" after some rows.
 const OCTOBER = [
@@ -68,6 +68,24 @@ test('Interview sheet: dates are day first; month tabs only; times read for sort
   assert.equal(courseOfTab('Sheet12'), null);
 });
 
+test('Interview sheet: rounds grouped for the filter, whatever the spelling; "RESCHEDULED…" marks a moved interview', () => {
+  const groups = ['R-01', 'R-1', 'ROUND 2', 'R-03', 'ASSESSSMENT', 'ASS.', 'ASSESMENT ROUND', 'ASSESSMENT - 2', 'SCFREENING ROUND',
+    'PRE-SCREENING', 'TELEPHONIC ROUND', 'HR Discussion', 'MANAGER ROUND', 'CLIENT', 'FINAL ROUND', 'AI', 'TYPING TEST', ''];
+  assert.deepEqual(groups.map(roundGroupOf), ['Round 1', 'Round 1', 'Round 2', 'Round 3', 'Assessment', 'Assessment', 'Assessment',
+    'Assessment', 'Screening', 'Screening', 'Telephonic', 'HR', 'Manager', 'Client', 'Final', 'AI', 'Typing test', '']);
+  const rows = [
+    ['INTERVIEW SCHEDULED REPORT 02/11/2026'],
+    ['PS'],
+    ['S.NO.', 'DATE', 'NAME', 'TIME', 'COMPANY', 'ROUND', 'ROOM'],
+    ['1', '02/11/2026', 'RAVI KUMAR', '3:30 PM', 'ALPHA', 'R-01', 'PUNE', 'RESCHEDULED FOR TOMORROW'],
+    ['2', '02/11/2026', 'NEHA SINGH', '4:00 PM', 'BETA', 'R-02', 'PUNE', 'PLACED'],
+  ];
+  assert.deepEqual(
+    parseInterviews('NOVEMBER 2026', rows).map((i) => [i.name, i.round, i.roundGroup, i.rescheduled, i.placed]),
+    [['RAVI KUMAR', 'R-01', 'Round 1', true, false], ['NEHA SINGH', 'R-02', 'Round 2', false, true]],
+  );
+});
+
 test('Interview sheet: older blocks ("IT JOBS FACTORY", "(PS)"), a date typo in a block, courses from the per-course tabs', () => {
   const AUGUST = [
     ['INTERVIEW SCHEDULED REPORT 03/08/2026'],
@@ -83,11 +101,11 @@ test('Interview sheet: older blocks ("IT JOBS FACTORY", "(PS)"), a date typo in 
   ];
   const items = parseInterviews('AUGUST 2026', AUGUST);
   assert.deepEqual(
-    items.map((i) => [i.date, i.course, i.name, i.minutes, i.room, i.status, i.placed]),
+    items.map((i) => [i.date, i.course, i.name, i.minutes, i.room, i.status, i.placed, i.rescheduled]),
     [
-      ['2026-08-03', null, 'ROHAN DAS', 780, '106', '', false],
-      ['2026-08-03', null, 'SARA KHAN', 1050, '106', 'RESCHEDULED', false],
-      ['2026-09-01', 'production-support', 'VIJAY RAO', 660, '111', '', false],
+      ['2026-08-03', null, 'ROHAN DAS', 780, '106', '', false, false],
+      ['2026-08-03', null, 'SARA KHAN', 1050, '106', 'RESCHEDULED', false, true],
+      ['2026-09-01', 'production-support', 'VIJAY RAO', 660, '111', '', false, false],
     ],
   );
   const DA_TAB = [

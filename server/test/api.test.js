@@ -1519,7 +1519,7 @@ test('Found by: needed when HR contact details are added or changed, one of the 
   const put = (body) => fetch(`${base}/jobs/${job._id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   let res = await put({ phone: ['93456 79001'] });
   assert.equal(res.status, 400);
-  assert.match((await res.json()).error, /^Found by: choose where the HR contact was found \(SignalHire, Apollo, LinkedIn, Naukri, Indeed\)/);
+  assert.match((await res.json()).error, /^Found by: choose where the HR contact was found \(SignalHire, Apollo, LinkedIn, Naukri, Indeed, Incoming call\)/);
   assert.equal((await Job.findById(job._id).lean()).manual, undefined, 'refused: nothing saved');
   res = await put({ phone: ['93456 79001'], foundBy: 'google' });
   assert.match((await res.json()).error, /^Found by: "google" is not one of SignalHire, Apollo, LinkedIn, Naukri, Indeed/);

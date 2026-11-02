@@ -10,7 +10,8 @@ import { COURSES } from './config/courses.js';
 //   1 | 01/10/2026 | RAVI KUMAR | ANYTIME | ALPHA SYSTEMS | ASSESSMENT | HYDERABAD | PLACED
 //
 // Until September most blocks have "IT JOBS FACTORY" for a course row (no course; "IT JOBS FACTORY (PS)" names
-// one). ROOM is a room number (105) or a city. After it the staff may write how it went ("PLACED", "RESCHEDULED").
+// one). ROOM is a room number (105) or a city. After it the staff may write how it went ("PLACED", "RESCHEDULED":
+// the interview moved, so it isn't counted that day).
 // Dates are day/month/year; a row whose date disagrees with its block's title, when only the title fits the month
 // of the tab, is a typo: the title's day counts. The per-course tabs ("DA INTERVIEW", "DS INTERVIEW") list the same
 // interviews: they only give the month tabs' interviews without a course theirs (same day and student). Other tabs
@@ -92,6 +93,30 @@ export function minutesOf(value) {
   return ((Number(m[1]) % 12) + (pm ? 12 : 0)) * 60 + Number(m[2] ?? 0);
 }
 
+// A round as the staff wrote it -> its group, for the round filter: "R-01", "R-1", "ROUND 1" -> "Round 1";
+// "ASSESSSMENT", "ASS.", "ASSESSMENT - 2" -> "Assessment"; "HR DISCUSSION" -> "HR"; any other -> itself, without
+// " ROUND" ("TYPING TEST" -> "Typing test"); blank -> ''.
+const ROUND_GROUPS = [
+  [/^ASS/, 'Assessment'],
+  [/^(PRE[-\s]?)?SC\w*REENING/, 'Screening'],
+  [/^TELE/, 'Telephonic'],
+  [/^HR\b/, 'HR'],
+  [/^MANAGER/, 'Manager'],
+  [/^CLIENT/, 'Client'],
+  [/^FINAL/, 'Final'],
+  [/^AI\b/, 'AI'],
+  [/^DISCUSSION/, 'Discussion'],
+];
+export function roundGroupOf(value) {
+  const s = text(value).toUpperCase();
+  const numbered = /^R(?:OUND)?\s*[-.]?\s*0*(\d{1,2})$/.exec(s);
+  if (numbered) return `Round ${Number(numbered[1])}`;
+  const known = ROUND_GROUPS.find(([pattern]) => pattern.test(s));
+  if (known) return known[1];
+  const words = s.replace(/\s+ROUND$/, '').toLowerCase();
+  return words && words[0].toUpperCase() + words.slice(1);
+}
+
 // The month tabs' interviews without a course get it from the per-course tabs: the same day and student there.
 export function labelCourses(items, courseItems) {
   const key = (i) => `${i.date}|${i.name.toUpperCase().replace(/[^A-Z]/g, '')}`;
@@ -136,6 +161,7 @@ export function parseInterviews(title, rows) {
     const last = Math.max(...Object.values(cols));
     const status = cols.status !== undefined ? cells[cols.status] ?? '' : cells.slice(last + 1).filter(Boolean).join(' ');
     const time = cells[cols.time] ?? '';
+    const round = cells[cols.round] ?? '';
     items.push({
       id: `${title}!${index + 1}`,
       date,
@@ -144,10 +170,13 @@ export function parseInterviews(title, rows) {
       time,
       minutes: minutesOf(time),
       company: cells[cols.company] ?? '',
-      round: cells[cols.round] ?? '',
+      round,
+      roundGroup: roundGroupOf(round),
       room: cells[cols.room] ?? '',
       status,
       placed: /\b(placed|selected)\b/i.test(status),
+      // "RESCHEDULED", "RESCHEDULED FOR TOMORROW": listed, but not counted as an interview that day.
+      rescheduled: /\bre-?schedul/i.test(status),
     });
   });
   return items;

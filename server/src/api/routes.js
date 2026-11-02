@@ -4,20 +4,21 @@ import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
 import { EXCLUDED_COMPANIES, overExperienceText, underExperienceText } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
-import { Activity, CollectorRun, ContactOutcome, Job, NonFilteredJob, STUDENT_COLLATION } from '../models.js';
+import { Activity, CollectorRun, ContactOutcome, IncomingCall, Job, NonFilteredJob, STUDENT_COLLATION } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
 import { contactKey, parseOutcomeInput, remarkChange, remarkOf, studentChange } from '../outcomes.js';
 import { requirePermission } from '../auth.js';
 import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
-import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, jobRow, manualRecord, MAX_STUDENTS, parseFollowUpInput, PHONE_EXISTS } from './followUp.js';
+import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, jobRow, manualRecord, MAX_STUDENTS, parseFollowUpInput, PHONE_EXISTS, phoneKeysOf } from './followUp.js';
 // The HR contact details "Found by" is about (activity.js field names).
 const CONTACT_DETAILS = ['hrName', 'hrProfile', 'phone', 'email'];
 import { searchEverything } from './search.js';
 import { AllJobs } from './allJobs.js';
 import { ROLE_BOXES, roleTitleQuery } from '../config/roleBoxes.js';
 import { missingSettings } from '../interviews.js';
+import { callView, HOT_DAYS, hotCompanies, parseCallChange, parseCallInput, portalKeys } from '../incomingCalls.js';
 
 const router = express.Router();
 const STARTED_AT = new Date().toISOString(); // when this server started: settings added after it need a restart
@@ -732,53 +733,48 @@ router.get('/jobs', wrap(async (req, res) => {
   });
 }));
 
-// Saves the HR phone, email and remarks typed in for one job and returns the updated row. An empty
-// field clears it; when all three are empty the job has no typed-in details (and shows what its
-// postings say, if anything). The collector never writes these, so the next run can't undo them.
-// A phone number another job already has is refused (409) with PHONE_EXISTS, and `detail` says which job.
-// Only a signed-in person whose role may edit HR details (src/auth.js); every change is recorded under
-// their email (Activity).
-router.put('/jobs/:id/follow-up', requirePermission('edit-hr-details'), express.json({ limit: '10kb' }), wrap(async (req, res) => {
-  const notFound = () => res.status(404).json({ error: 'Job not found. It may have been removed.' });
-  if (!/^[a-f\d]{24}$/i.test(req.params.id)) return notFound();
-  const input = parseFollowUpInput(req.body);
-  if (input.error) return res.status(400).json({ error: input.error });
-
-  // A kept job, or a non-filtered one (ids are unique across both).
+// Saves the HR phone, email and remarks typed in for one job (parseFollowUpInput's value) and returns the updated
+// row. An empty field clears it; when all three are empty the job has no typed-in details (and shows what its
+// postings say, if anything). The collector never writes these, so the next run can't undo them. A kept job or a
+// non-filtered one (ids are unique across both). Every change is recorded under `person` (Activity). Returns
+// { job } or, when refused, { status, error, detail? }: 404 the job is gone; 409 PHONE_EXISTS, a number another
+// job already has (`detail` says which); 400 FOUND_BY_REQUIRED.
+const JOB_GONE = 'Job not found. It may have been removed.';
+async function saveFollowUp(id, value, person, via) {
   const fields = { foundPhones: 1, foundEmails: 1, manual: 1, title: 1, company: 1, course: 1 };
   let model = Job;
-  let current = await Job.findById(req.params.id, fields).lean();
+  let current = await Job.findById(id, fields).lean();
   if (!current) {
     model = NonFilteredJob;
-    current = await NonFilteredJob.findById(req.params.id, fields).lean();
+    current = await NonFilteredJob.findById(id, fields).lean();
   }
-  if (!current) return notFound();
-  const owner = await findPhoneOwner(input.value.phoneKeys, current);
+  if (!current) return { status: 404, error: JOB_GONE };
+  const owner = await findPhoneOwner(value.phoneKeys, current);
   if (owner) {
-    const number = input.value.phone.split(', ').find((p) => phoneKey(p) === owner.key);
+    const number = value.phone.split(', ').find((p) => phoneKey(p) === owner.key);
     const where = `"${owner.job.title}"${owner.job.company ? ` at ${owner.job.company}` : ''}`;
-    return res.status(409).json({ error: PHONE_EXISTS, detail: `${number} is already saved on ${where}.` });
+    return { status: 409, error: PHONE_EXISTS, detail: `${number} is already saved on ${where}.` };
   }
 
   const now = new Date();
   // Found by: the one chosen, else the one stored. Adding or changing HR contact details needs one; saving only
   // notes or students doesn't (older contacts may have none).
-  const record = manualRecord({ ...input.value, foundBy: input.value.foundBy || current.manual?.foundBy || '' }, now);
+  const record = manualRecord({ ...value, foundBy: value.foundBy || current.manual?.foundBy || '' }, now);
   const update = record ? { $set: { manual: record } } : { $unset: { manual: 1 } };
 
   // What the dashboard shows before and after this save; nothing changed (e.g. saved as it was): no record.
   const changes = contactChanges(contactView(current), contactView({ ...current, manual: record ?? undefined }));
   const contactsChanged = changes.some((c) => CONTACT_DETAILS.includes(c.field));
   if (contactsChanged && (record?.hrNames || record?.hrProfiles || record?.phone || record?.email) && !record.foundBy) {
-    return res.status(400).json({ error: FOUND_BY_REQUIRED });
+    return { status: 400, error: FOUND_BY_REQUIRED };
   }
   // The record is written first, so a change is never saved without one. If the save then fails, the
   // record goes again.
   const entry = changes.length
     ? await Activity.create({
         at: now,
-        actor: req.person,
-        ...(req.via ? { via: req.via } : {}),
+        actor: person,
+        ...(via ? { via } : {}),
         action: overallAction(changes),
         job: { id: current._id, set: model === Job ? 'filtered' : 'nonfiltered', title: current.title, company: current.company, course: current.course },
         changes,
@@ -787,16 +783,27 @@ router.put('/jobs/:id/follow-up', requirePermission('edit-hr-details'), express.
   const undoRecord = () => (entry ? Activity.deleteOne({ _id: entry._id }).catch((err) => console.error(`Could not remove activity ${entry._id}: ${err.message}`)) : null);
   let job;
   try {
-    job = await model.findByIdAndUpdate(req.params.id, update, { returnDocument: 'after', projection: JOB_FIELDS }).lean();
+    job = await model.findByIdAndUpdate(id, update, { returnDocument: 'after', projection: JOB_FIELDS }).lean();
   } catch (err) {
     await undoRecord();
     throw err;
   }
   if (!job) {
     await undoRecord();
-    return notFound();
+    return { status: 404, error: JOB_GONE };
   }
-  res.json(jobRow(job));
+  return { job: jobRow(job) };
+}
+
+// The HR details typed in for one job, from its details window. Only a signed-in person whose role may edit HR
+// details (src/auth.js).
+router.put('/jobs/:id/follow-up', requirePermission('edit-hr-details'), express.json({ limit: '10kb' }), wrap(async (req, res) => {
+  if (!/^[a-f\d]{24}$/i.test(req.params.id)) return res.status(404).json({ error: JOB_GONE });
+  const input = parseFollowUpInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const saved = await saveFollowUp(req.params.id, input.value, req.person, req.via);
+  if (saved.error) return res.status(saved.status).json({ error: saved.error, ...(saved.detail ? { detail: saved.detail } : {}) });
+  res.json(saved.job);
 }));
 
 // The activity record: who changed which job's HR details, when, and what changed. Newest first.
@@ -866,10 +873,11 @@ const outcomeView = (o) => ({ student: o.student ?? '', status: o.status ?? '', 
 const firstOutcome = (outcomes) => outcomes.find((o) => o.student) ?? outcomes[0] ?? null;
 const MAX_PERFORMANCE_ROWS = 20_000;
 
-router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
-  const range = activityRange(req.query);
-  const [rows, first] = await Promise.all([
-    Activity.aggregate([
+// The numbers and emails added to jobs in a range (from the activity record), newest first, as GET /performance
+// sends them: at most MAX_PERFORMANCE_ROWS (truncated: there were more); keep: only the rows it passes (looked at
+// before their follow-ups are read).
+async function contactRows(range, keep = () => true) {
+  const rows = await Activity.aggregate([
       { $match: { at: { $gte: range.start, $lt: range.end } } },
       { $sort: { at: -1, _id: -1 } },
       { $unwind: '$changes' },
@@ -887,10 +895,8 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
           value: '$changes.added',
         },
       },
-    ]),
-    Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean(),
-  ]);
-  const shown = rows.slice(0, MAX_PERFORMANCE_ROWS);
+    ]);
+  const shown = rows.slice(0, MAX_PERFORMANCE_ROWS).filter(keep);
   const jobIds = [...new Map(shown.map((r) => [String(r.job.id), r.job.id])).values()];
   const [outcomeDocs, sourceRecords] = await Promise.all([
     ContactOutcome.find({ job: { $in: jobIds.map(String) } }).sort({ _id: 1 }).lean(),
@@ -914,17 +920,26 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
     sourcesOf.set(String(record.job.id), list);
   }
   const foundByOf = (row) => (sourcesOf.get(String(row.job.id)) ?? []).filter((s) => s.at <= row.at).at(-1)?.source ?? '';
+  return {
+    rows: shown.map((row) => {
+      const key = contactKey(row.field, row.value);
+      const outcomes = outcomesOf.get(`${row.job.id}|${row.field}|${key}`) ?? [];
+      return { ...row, key, companyKey: companyKey(row.job.company), outcomes, outcome: firstOutcome(outcomes), foundBy: foundByOf(row) };
+    }),
+    truncated: rows.length > MAX_PERFORMANCE_ROWS,
+  };
+}
+
+router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
+  const range = activityRange(req.query);
+  const [{ rows, truncated }, first] = await Promise.all([contactRows(range), Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean()]);
   res.json({
     days: range.days,
     from: range.from,
     to: range.to,
     since: first?.at ?? null, // when the activity record began: nothing before it can be counted
-    rows: shown.map((row) => {
-      const key = contactKey(row.field, row.value);
-      const outcomes = outcomesOf.get(`${row.job.id}|${row.field}|${key}`) ?? [];
-      return { ...row, key, outcomes, outcome: firstOutcome(outcomes), foundBy: foundByOf(row) };
-    }),
-    truncated: rows.length > MAX_PERFORMANCE_ROWS,
+    rows,
+    truncated,
     students: await knownStudents(), // names to suggest when assigning
   });
 }));
@@ -1087,9 +1102,146 @@ router.get('/interviews', requirePermission('view'), wrap(async (req, res) => {
   res.json({ ...period, configured: true, items, readAt: sheet.readAt, error: sheet.error });
 }));
 
-// Every student name used so far (jobs' "Assigned to" lists and the report's assignments), each once, A–Z.
+// ---------- Incoming calls ----------
+
+// HR calls to our students, logged by the team (src/incomingCalls.js), in a period whose days end today (as in the
+// Performance report; ?days= or ?from=&to=), newest first, each with whether its company is in our HR database now;
+// since: when the first call was logged. Plus the student names used so far, to suggest. Signed-in people only.
+const MAX_CALLS = 2_000;
+const HOT_ROW_DAYS = 30; // Assign numbers' marked numbers: a calling company's numbers added this recently
+const ADMINS = ['ADMIN', 'SUPER_ADMIN'];
+
+router.get('/incoming-calls', requirePermission('view'), wrap(async (req, res) => {
+  const range = activityRange(req.query);
+  const [calls, inPortal, first, students] = await Promise.all([
+    IncomingCall.find({ at: { $gte: range.start, $lt: range.end } }).sort({ at: -1, _id: -1 }).limit(MAX_CALLS + 1).lean(),
+    portalKeys(),
+    IncomingCall.findOne({}, { at: 1 }).sort({ at: 1 }).lean(),
+    knownStudents(),
+  ]);
+  res.json({
+    days: range.days,
+    from: range.from,
+    to: range.to,
+    since: first?.at ?? null,
+    items: calls.slice(0, MAX_CALLS).map((call) => callView(call, inPortal)),
+    truncated: calls.length > MAX_CALLS,
+    students,
+  });
+}));
+
+// The companies in our HR database that called a student in the last HOT_DAYS (the latest call first), and the
+// numbers and emails added to their jobs in the last HOT_ROW_DAYS (rows as GET /performance sends them): Assign
+// numbers lists the ones not given out yet first, marked. Signed-in people only.
+router.get('/incoming-calls/hot', requirePermission('view'), wrap(async (req, res) => {
+  const calls = await IncomingCall.find({ at: { $gte: new Date(Date.now() - HOT_DAYS * DAY_MS) } }).sort({ at: -1, _id: -1 }).limit(MAX_CALLS).lean();
+  const companies = hotCompanies(calls, await portalKeys());
+  if (!companies.length) return res.json({ days: HOT_DAYS, companies, rows: [] });
+  const keys = new Set(companies.map((c) => c.key));
+  const { rows } = await contactRows(activityRange({ days: HOT_ROW_DAYS }), (row) => keys.has(companyKey(row.job.company)));
+  res.json({ days: HOT_DAYS, companies, rows });
+}));
+
+// Logs a call (parseCallInput). With one of the company's openings chosen (jobId) and addToJob (the default), the HR
+// number, name and email are added to the opening's HR details (Found by "Incoming call"), recorded under the
+// person like any change, so the number can be given to other students on Assign numbers. A number already saved
+// on a job isn't added again: the call says which job has it. Answers 201 with the call. Needs record-outcomes.
+router.post('/incoming-calls', requirePermission('record-outcomes'), express.json({ limit: '8kb' }), wrap(async (req, res) => {
+  const input = parseCallInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const call = input.value;
+
+  const fields = { title: 1, company: 1, course: 1, manual: 1, foundPhones: 1, foundEmails: 1 };
+  const setOf = async (id) => ((await Job.exists({ _id: id })) ? 'filtered' : 'nonfiltered');
+  let job = null;
+  if (call.jobId) {
+    job = (await Job.findById(call.jobId, fields).lean()) ?? (await NonFilteredJob.findById(call.jobId, fields).lean());
+    if (!job) return res.status(400).json({ error: 'Opening: it is no longer stored. Choose another one, or none.' });
+    if (companyKey(job.company) !== call.companyKey) return res.status(400).json({ error: `Opening: "${job.title}" is not at ${call.company}.` });
+    job.set = await setOf(job._id);
+  }
+  const ref = (j, set) => ({ id: j._id, set, title: j.title, company: j.company });
+
+  // Where the HR number is in our HR database: on the chosen opening already, on another job, or added now.
+  let number;
+  if (job && phoneKeysOf(job).has(call.phoneKey)) number = { added: false, job: ref(job, job.set) };
+  else {
+    const owner = await findPhoneOwner([call.phoneKey], job ?? { _id: null });
+    if (owner) number = { added: false, job: ref(owner.job, await setOf(owner.job._id)) };
+    else if (job && call.addToJob) {
+      const shown = contactView(job);
+      const merged = parseFollowUpInput({
+        hrName: [...shown.hrNames, call.hrName],
+        hrProfile: shown.hrProfiles,
+        phone: [shown.phone, call.phone],
+        email: [shown.email, call.email],
+        remarks: shown.remarks,
+        assignedTo: shown.assignedTo,
+        foundBy: 'incoming-call',
+      });
+      const saved = merged.error ? merged : await saveFollowUp(String(job._id), merged.value, req.person, req.via);
+      number = saved.error ? { added: false, problem: saved.detail || saved.error } : { added: true, job: ref(job, job.set) };
+    }
+  }
+
+  const now = new Date();
+  const doc = await IncomingCall.create({
+    at: call.at,
+    phone: call.phone,
+    phoneKey: call.phoneKey,
+    ...(call.hrName ? { hrName: call.hrName } : {}),
+    ...(call.email ? { email: call.email } : {}),
+    company: call.company,
+    companyKey: call.companyKey,
+    ...(job ? { job: { id: job._id, set: job.set, title: job.title, course: job.course } } : {}),
+    course: call.course,
+    ...(call.student ? { student: call.student } : {}),
+    source: call.source,
+    ...(call.outcome ? { outcome: call.outcome } : {}),
+    ...(call.note ? { note: call.note } : {}),
+    ...(number ? { number } : {}),
+    createdAt: now,
+    createdBy: { email: req.person.email, name: req.person.name ?? '' },
+  });
+  res.status(201).json(callView(doc.toObject(), await portalKeys()));
+}));
+
+// A logged call's outcome, set or changed later (an interview fixed after a "call back"). Needs record-outcomes.
+router.put('/incoming-calls/:id', requirePermission('record-outcomes'), express.json({ limit: '2kb' }), wrap(async (req, res) => {
+  if (!/^[a-f\d]{24}$/i.test(req.params.id)) return res.status(404).json({ error: 'Call not found. It may have been removed.' });
+  const input = parseCallChange(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const update = {
+    ...(input.value.outcome ? { $set: { outcome: input.value.outcome } } : { $unset: { outcome: 1 } }),
+  };
+  update.$set = { ...update.$set, updatedAt: new Date(), updatedBy: { email: req.person.email, name: req.person.name ?? '' } };
+  const call = await IncomingCall.findByIdAndUpdate(req.params.id, update, { returnDocument: 'after' }).lean();
+  if (!call) return res.status(404).json({ error: 'Call not found. It may have been removed.' });
+  res.json(callView(call, await portalKeys()));
+}));
+
+// Removes a call logged by mistake: by the person who logged it, or an admin. A number it added to an opening stays
+// there (it is an HR detail like any other: change it in the job's window). Needs record-outcomes.
+router.delete('/incoming-calls/:id', requirePermission('record-outcomes'), wrap(async (req, res) => {
+  const gone = () => res.status(404).json({ error: 'Call not found. It may have been removed.' });
+  if (!/^[a-f\d]{24}$/i.test(req.params.id)) return gone();
+  const call = await IncomingCall.findById(req.params.id, { createdBy: 1 }).lean();
+  if (!call) return gone();
+  const own = String(call.createdBy?.email ?? '').toLowerCase() === String(req.person.email ?? '').toLowerCase();
+  if (!own && !ADMINS.includes(req.person.role)) return res.status(403).json({ error: 'Only the person who logged this call, or an admin, can remove it.' });
+  await IncomingCall.deleteOne({ _id: call._id });
+  res.json({ removed: true });
+}));
+
+// Every student name used so far (jobs' "Assigned to" lists, the report's assignments and the incoming calls),
+// each once, A–Z.
 async function knownStudents() {
-  const lists = await Promise.all([Job.distinct('manual.assignedTo'), NonFilteredJob.distinct('manual.assignedTo'), ContactOutcome.distinct('student')]);
+  const lists = await Promise.all([
+    Job.distinct('manual.assignedTo'),
+    NonFilteredJob.distinct('manual.assignedTo'),
+    ContactOutcome.distinct('student'),
+    IncomingCall.distinct('student'),
+  ]);
   const names = new Map();
   for (const name of lists.flat()) if (name && !names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
   return [...names.values()].sort((a, b) => a.localeCompare(b)).slice(0, 2000);

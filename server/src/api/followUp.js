@@ -11,7 +11,8 @@ export const PHONE_EXISTS = 'This number already exists.';
 
 // Where the research team found a job's HR contact ("Found by"): needed whenever HR contact details (names,
 // profile links, phones, emails) are added or changed; the dashboard has a dropdown of these.
-export const HR_SOURCES = { signalhire: 'SignalHire', apollo: 'Apollo', linkedin: 'LinkedIn', naukri: 'Naukri', indeed: 'Indeed' };
+// 'incoming-call': the HR called one of our students (logged on the Incoming calls form, src/incomingCalls.js).
+export const HR_SOURCES = { signalhire: 'SignalHire', apollo: 'Apollo', linkedin: 'LinkedIn', naukri: 'Naukri', indeed: 'Indeed', 'incoming-call': 'Incoming call' };
 export const FOUND_BY_REQUIRED = `Found by: choose where the HR contact was found (${Object.values(HR_SOURCES).join(', ')}).`;
 
 // Phone numbers, email addresses, HR names and HR profile links a job can have typed in (each; the
@@ -148,7 +149,7 @@ export function manualRecord({ hrNames = [], hrProfiles = [], foundBy = '', phon
 }
 
 // Every phone number a stored job has, as phoneKeys: typed in, and found in its postings.
-const phoneKeysOf = (job) => new Set([...(job.manual?.phoneKeys ?? []), ...(job.foundPhones ?? []).map(phoneKey)]);
+export const phoneKeysOf = (job) => new Set([...(job.manual?.phoneKeys ?? []), ...(job.foundPhones ?? []).map(phoneKey)]);
 
 // Another job that already has one of these numbers, as { job, key }, or null: a kept job or a
 // non-filtered one, so a number is never on two jobs whichever view it was typed into. Numbers the job

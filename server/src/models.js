@@ -36,7 +36,7 @@ const jobSchema = new mongoose.Schema(
         {
           hrNames: { type: [String], default: undefined }, // the HR people's names
           hrProfiles: { type: [String], default: undefined }, // links to their profiles (e.g. LinkedIn)
-          foundBy: String, // where the HR contact was found: signalhire | apollo | linkedin | naukri | indeed (followUp.js HR_SOURCES)
+          foundBy: String, // where the HR contact was found: signalhire | apollo | linkedin | naukri | indeed | incoming-call (followUp.js HR_SOURCES)
           phone: String,
           phoneKeys: { type: [String], default: undefined },
           email: String,
@@ -242,6 +242,44 @@ export const STUDENT_COLLATION = { locale: 'en', strength: 2 }; // "Riya" and "r
 contactOutcomeSchema.index({ job: 1, field: 1, key: 1, student: 1 }, { unique: true, collation: STUDENT_COLLATION });
 
 export const ContactOutcome = mongoose.model('ContactOutcome', contactOutcomeSchema);
+
+// An HR person's call to one of our students, logged by the team (src/incomingCalls.js): kept for good.
+const incomingCallSchema = new mongoose.Schema(
+  {
+    at: { type: Date, required: true }, // when the call came
+    phone: { type: String, required: true }, // the HR's number, as written
+    phoneKey: { type: String, required: true }, // bare digits (phoneKey)
+    hrName: String,
+    email: String,
+    company: { type: String, required: true }, // as chosen from our HR database, or typed
+    companyKey: { type: String, required: true }, // companyKey(company): the same company however it is spelled
+    // The opening the call was about (a stored job of the company), if chosen.
+    job: { type: new mongoose.Schema({ id: mongoose.Schema.Types.ObjectId, set: String, title: String, course: String }, { _id: false }), default: undefined },
+    course: { type: String, required: true }, // the course of the student called
+    student: String,
+    source: String, // where the HR found the student: incomingCalls.js CALL_SOURCES
+    outcome: String, // what came of it: incomingCalls.js CALL_OUTCOMES ('' = not said yet)
+    note: String,
+    // The HR number in our HR database: added to the opening now (added), or already saved on a job (added: false,
+    // job: that one); problem: why it couldn't be added.
+    number: {
+      type: new mongoose.Schema(
+        { added: Boolean, job: { id: mongoose.Schema.Types.ObjectId, set: String, title: String, company: String }, problem: String },
+        { _id: false },
+      ),
+      default: undefined,
+    },
+    createdAt: { type: Date, required: true },
+    createdBy: { email: String, name: String },
+    updatedAt: Date,
+    updatedBy: { email: String, name: String },
+  },
+  { versionKey: false },
+);
+incomingCallSchema.index({ at: -1 });
+incomingCallSchema.index({ companyKey: 1, at: -1 });
+
+export const IncomingCall = mongoose.model('IncomingCall', incomingCallSchema, 'incomingcalls');
 
 // ---------- IJF AI (src/ai/) ----------
 
