@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { companyKey } from '../normalize.js';
 
 // Large IT services firms, left out of the dashboard. Same list as COMPANY_BLACKLIST in
-// naukri-scraper/scraper_file/scraper.py. A name also matches its longer forms and known aliases:
+// naukri-scraper/scraper_file/scraper.py, plus Oracle. A name also matches its longer forms and known aliases:
 // "TCS" catches "Tata Consultancy Services", "IBM" catches "IBM India Pvt Ltd",
 // "Infosys" catches "Infosys BPM".
 // The dashboard names the first four, so keep the best-known first.
@@ -14,6 +14,7 @@ export const EXCLUDED_COMPANIES = [
   'LTIMindtree', 'Genpact', 'Tata Consultancy Services', 'CTS', 'HCLTech', 'LTI', 'Mindtree',
   'Teleperformance', 'Sutherland',
   'LTM', // LTIMindtree's newer name in job posts
+  'Oracle', // since 4 Nov 2026 (user request); not in the scraper's list, so its jobs still reach Non-filtered
 ];
 
 const excludedKeys = [...new Set(EXCLUDED_COMPANIES.map(companyKey))];
@@ -24,8 +25,9 @@ export function isExcludedCompany(name) {
 }
 
 // The minimum experience a job asks for must be at least EXPERIENCE_MIN years (default 1) and at most
-// EXPERIENCE_MAX (default 5, since 30 Oct 2026; none before): "1-3 yrs", "1-5 yrs", "3-6 yrs" and "5-8 yrs" are
-// kept; fresher jobs ("0-2 yrs", "Fresher") and those asking for more than 5 years ("6-10 yrs", "8+ yrs") are not.
+// EXPERIENCE_MAX (default 4 since 4 Nov 2026; 5 from 30 Oct; none before): "1-3 yrs", "1-6 yrs" and "4-6 yrs" are
+// kept; fresher jobs ("0-2 yrs", "Fresher") and those asking for 5 years or more ("5+ yrs", "5-8 yrs", "8+ yrs")
+// are not.
 export const experienceInRange = (min) =>
   min != null && min >= config.experience.min && (config.experience.max == null || min <= config.experience.max);
 
@@ -48,8 +50,8 @@ export const nonFilteredReason = (job) => leftOutReason(job) ?? (job.fromExtraSe
 // the fresher jobs.
 export const underExperienceText = () =>
   config.experience.min <= 1 ? 'Fresher (asks for no experience)' : `Asks for under ${config.experience.min} years`;
-// leftOutBy 'senior' in words: the jobs asking for more than EXPERIENCE_MAX years.
-export const overExperienceText = () => `Asks for more than ${config.experience.max} years`;
+// leftOutBy 'senior' in words: the jobs asking for more than EXPERIENCE_MAX years (5 or more).
+export const overExperienceText = () => `Asks for ${config.experience.max + 1}+ years`;
 
 // "1+" (no upper limit) or "1-5", for messages.
 export const experienceRangeText = () =>

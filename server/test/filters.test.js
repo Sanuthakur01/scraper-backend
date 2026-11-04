@@ -22,20 +22,21 @@ test('big IT services firms are excluded under the names platforms use for them'
     'IBM', 'IBM India Pvt Ltd', 'International Business Machines', 'Wipro Limited', 'Accenture in India',
     'Cognizant Technology Solutions', 'HCLTech', 'HCL Technologies', 'Tech Mahindra', 'Capgemini Technology Services India',
     'LTIMindtree', 'Genpact India Pvt. Ltd.', 'LTM', 'LTM Limited',
+    'Oracle', 'Oracle Corporation', 'Oracle Financial Services Software', // Oracle: since 4 Nov 2026
   ]) {
     assert.ok(isExcludedCompany(name), name);
   }
 });
 
 test('other companies are kept, including ones whose names merely start like an excluded one', () => {
-  for (const name of ['Citi', 'Deloitte', 'Infopie Business Solutions', 'Ibmetrics Analytics', 'Wiproxy Labs', 'Microchip Technology', 'LTMS Analytics', '']) {
+  for (const name of ['Citi', 'Deloitte', 'Infopie Business Solutions', 'Ibmetrics Analytics', 'Wiproxy Labs', 'Microchip Technology', 'LTMS Analytics', 'Oraclean Labs', '']) {
     assert.ok(!isExcludedCompany(name), name);
   }
 });
 
-test('experience: the minimum asked must be 1 to 5 years (fresher jobs and 5+ year jobs are left out)', () => {
-  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 10, null].map(experienceInRange), [false, true, true, true, true, true, false, false, false]);
-  assert.deepEqual([0, 1, 5, 6, 10, null].map(experienceReason), ['experience', null, null, 'senior', 'senior', null]);
+test('experience: the minimum asked must be 1 to 4 years (fresher jobs and jobs asking for 5+ years are left out)', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 10, null].map(experienceInRange), [false, true, true, true, true, false, false, false, false]);
+  assert.deepEqual([0, 1, 4, 5, 6, 10, null].map(experienceReason), ['experience', null, null, 'senior', 'senior', 'senior', null]);
 });
 
 test('jobs are checked before saving', () => {
@@ -47,9 +48,10 @@ test('jobs are checked before saving', () => {
   assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 3), now).job?.experienceBand, '1', '1-3 yrs is kept, in the 1 yr group');
   assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 5), now).skip, undefined, '1-5 yrs is kept');
   const senior = buildJob(naukri, naukriItem('Alpha Analytics', 6, 9), now);
-  assert.deepEqual([senior.skip, senior.job?.experienceBand], ['senior', '5+'], '6-9 yrs (more than 5): left out, its details come back for Non-filtered');
+  assert.deepEqual([senior.skip, senior.job?.experienceBand], ['senior', '5+'], '6-9 yrs (5 or more): left out, its details come back for Non-filtered');
   assert.ok(buildJob(naukri, naukriItem('Alpha Analytics', 3, 6), now).job, '3-6 yrs is kept');
-  assert.ok(buildJob(naukri, naukriItem('Alpha Analytics', 5, 8), now).job, '5-8 yrs is kept');
+  assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 5, 8), now).skip, 'senior', '5-8 yrs (5 or more): left out');
+  assert.equal(buildJob(naukri, naukriItem('Alpha Analytics', 1, 6), now).skip, undefined, '1-6 yrs is kept');
   const unknown = buildJob(naukri, naukriItem('Alpha Analytics', null, null), now);
   assert.equal(unknown.job.experienceUnknown, true, 'kept only if it matches a kept job elsewhere');
 });

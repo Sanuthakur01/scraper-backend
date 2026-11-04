@@ -11,7 +11,8 @@ import { requirePermission } from '../auth.js';
 import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
-import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, jobRow, manualRecord, MAX_STUDENTS, parseFollowUpInput, PHONE_EXISTS, phoneKeysOf } from './followUp.js';
+import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, jobRow, manualRecord, MAX_STUDENTS, parseFollowUpInput, PHONE_EXISTS, phoneKeysOf, sameCompanyValues } from './followUp.js';
+import { hasTypedHr, sameCompanyOf } from '../sameCompany.js';
 // The HR contact details "Found by" is about (activity.js field names).
 const CONTACT_DETAILS = ['hrName', 'hrProfile', 'phone', 'email'];
 import { searchEverything } from './search.js';
@@ -645,7 +646,7 @@ router.get('/role-jobs', requirePermission('view'), wrap(async (req, res) => {
     page,
     pageSize,
     pages: Math.max(1, Math.ceil(total / pageSize)),
-    items: items.map(jobRow),
+    items: await withSameCompany(items),
   });
 }));
 
@@ -680,7 +681,7 @@ router.get('/companies/jobs', requirePermission('view'), wrap(async (req, res) =
   const spellings = new Map();
   for (const job of items) spellings.set(job.company, (spellings.get(job.company) ?? 0) + 1);
   const name = [...spellings].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0]?.[0] ?? '';
-  res.json({ key, name, days, total: found.reduce((n, f) => n + f.total, 0), items: items.map(jobRow) });
+  res.json({ key, name, days, total: found.reduce((n, f) => n + f.total, 0), items: await withSameCompany(items) });
 }));
 
 // The search box on the dashboard: companies, HR names, phone numbers and emails, in kept and left-out
@@ -729,18 +730,30 @@ router.get('/jobs', wrap(async (req, res) => {
     total,
     withContact,
     pages: Math.max(1, Math.ceil(total / pageSize)),
-    items: items.map(jobRow),
+    items: await withSameCompany(items),
   });
 }));
+
+// Job rows (jobRow) with what the same company's other jobs say (sameCompany.js): `sameCompany` { earlier, firstAt,
+// hr } on the jobs it has something for ("Hiring again", the HR contact "Use this HR" copies).
+async function withSameCompany(docs) {
+  const info = await sameCompanyOf(docs);
+  return docs.map((doc) => {
+    const same = info.get(String(doc._id));
+    return { ...jobRow(doc), ...(same ? { sameCompany: same } : {}) };
+  });
+}
 
 // Saves the HR phone, email and remarks typed in for one job (parseFollowUpInput's value) and returns the updated
 // row. An empty field clears it; when all three are empty the job has no typed-in details (and shows what its
 // postings say, if anything). The collector never writes these, so the next run can't undo them. A kept job or a
-// non-filtered one (ids are unique across both). Every change is recorded under `person` (Activity). Returns
+// non-filtered one (ids are unique across both). Every change is recorded under `person` (Activity); numbers and
+// emails the same company's other jobs already have are marked in it (`known`: copied, not found). copiedFrom: the
+// same company's job the HR contact was copied from ("Use this HR"; Found by isn't needed then). Returns
 // { job } or, when refused, { status, error, detail? }: 404 the job is gone; 409 PHONE_EXISTS, a number another
-// job already has (`detail` says which); 400 FOUND_BY_REQUIRED.
+// company's job already has (`detail` says which); 400 FOUND_BY_REQUIRED.
 const JOB_GONE = 'Job not found. It may have been removed.';
-async function saveFollowUp(id, value, person, via) {
+async function saveFollowUp(id, value, person, via, { copiedFrom } = {}) {
   const fields = { foundPhones: 1, foundEmails: 1, manual: 1, title: 1, company: 1, course: 1 };
   let model = Job;
   let current = await Job.findById(id, fields).lean();
@@ -765,9 +778,12 @@ async function saveFollowUp(id, value, person, via) {
   // What the dashboard shows before and after this save; nothing changed (e.g. saved as it was): no record.
   const changes = contactChanges(contactView(current), contactView({ ...current, manual: record ?? undefined }));
   const contactsChanged = changes.some((c) => CONTACT_DETAILS.includes(c.field));
-  if (contactsChanged && (record?.hrNames || record?.hrProfiles || record?.phone || record?.email) && !record.foundBy) {
+  if (contactsChanged && (record?.hrNames || record?.hrProfiles || record?.phone || record?.email) && !record.foundBy && !copiedFrom) {
     return { status: 400, error: FOUND_BY_REQUIRED };
   }
+  const added = Object.fromEntries(CONTACT_FIELDS.map((field) => [field, changes.find((c) => c.field === field)?.added ?? []]));
+  const known = await sameCompanyValues(current, added);
+  for (const change of changes) if (known[change.field]?.length) change.known = known[change.field];
   // The record is written first, so a change is never saved without one. If the save then fails, the
   // record goes again.
   const entry = changes.length
@@ -778,6 +794,7 @@ async function saveFollowUp(id, value, person, via) {
         action: overallAction(changes),
         job: { id: current._id, set: model === Job ? 'filtered' : 'nonfiltered', title: current.title, company: current.company, course: current.course },
         changes,
+        ...(copiedFrom ? { copiedFrom } : {}),
       })
     : null;
   const undoRecord = () => (entry ? Activity.deleteOne({ _id: entry._id }).catch((err) => console.error(`Could not remove activity ${entry._id}: ${err.message}`)) : null);
@@ -792,7 +809,7 @@ async function saveFollowUp(id, value, person, via) {
     await undoRecord();
     return { status: 404, error: JOB_GONE };
   }
-  return { job: jobRow(job) };
+  return { job: (await withSameCompany([job]))[0] };
 }
 
 // The HR details typed in for one job, from its details window. Only a signed-in person whose role may edit HR
@@ -802,6 +819,47 @@ router.put('/jobs/:id/follow-up', requirePermission('edit-hr-details'), express.
   const input = parseFollowUpInput(req.body);
   if (input.error) return res.status(400).json({ error: input.error });
   const saved = await saveFollowUp(req.params.id, input.value, req.person, req.via);
+  if (saved.error) return res.status(saved.status).json({ error: saved.error, ...(saved.detail ? { detail: saved.detail } : {}) });
+  res.json(saved.job);
+}));
+
+// "Use this HR": copies the HR contact (names, profile links, numbers, emails, Found by) the team saved on another
+// job of the same company ({ from: its id }) to this one, added to what this one has; its notes and students stay.
+// Recorded like any change, with copiedFrom, and its numbers and emails as known ones: not new contacts in the
+// Performance report. Answers the updated row. Needs edit-hr-details.
+const SAME_COMPANY_ONLY = 'Only the HR contact of a job at the same company can be copied.';
+router.post('/jobs/:id/copy-hr', requirePermission('edit-hr-details'), express.json({ limit: '2kb' }), wrap(async (req, res) => {
+  const from = String(req.body?.from ?? '');
+  if (!/^[a-f\d]{24}$/i.test(req.params.id)) return res.status(404).json({ error: JOB_GONE });
+  if (!/^[a-f\d]{24}$/i.test(from) || from === req.params.id) return res.status(400).json({ error: 'from must be the id of another job.' });
+  const fields = { title: 1, company: 1, manual: 1, foundPhones: 1, foundEmails: 1 };
+  const find = async (id) => {
+    const kept = await Job.findById(id, fields).lean();
+    if (kept) return { ...kept, set: 'filtered' };
+    const left = await NonFilteredJob.findById(id, fields).lean();
+    return left && { ...left, set: 'nonfiltered' };
+  };
+  const [job, source] = await Promise.all([find(req.params.id), find(from)]);
+  if (!job) return res.status(404).json({ error: JOB_GONE });
+  if (!source) return res.status(404).json({ error: 'The job to copy from is no longer stored.' });
+  const key = companyKey(job.company);
+  if (!key || companyKey(source.company) !== key) return res.status(400).json({ error: SAME_COMPANY_ONLY });
+  if (!hasTypedHr(source.manual)) return res.status(400).json({ error: 'That job has no HR contact to copy.' });
+
+  const mine = contactView(job);
+  const theirs = source.manual;
+  const input = parseFollowUpInput({
+    hrName: [...mine.hrNames, ...(theirs.hrNames ?? [])],
+    hrProfile: [...mine.hrProfiles, ...(theirs.hrProfiles ?? [])],
+    phone: [mine.phone, theirs.phone ?? ''],
+    email: [mine.email, theirs.email ?? ''],
+    remarks: mine.remarks,
+    assignedTo: mine.assignedTo,
+    foundBy: mine.foundBy || theirs.foundBy || '',
+  });
+  if (input.error) return res.status(400).json({ error: input.error });
+  const copiedFrom = { id: source._id, set: source.set, title: source.title, company: source.company };
+  const saved = await saveFollowUp(req.params.id, input.value, req.person, req.via, { copiedFrom });
   if (saved.error) return res.status(saved.status).json({ error: saved.error, ...(saved.detail ? { detail: saved.detail } : {}) });
   res.json(saved.job);
 }));
@@ -863,7 +921,9 @@ router.get('/activity', requirePermission('view'), wrap(async (req, res) => {
 // Who added how many HR contact details (phone numbers and emails) in a period, from the activity
 // record: one row per number or email a person added, with when, on which job and where it was found
 // (Found by). A number only
-// written differently, or one the job's posting already had, isn't one (see activity.js). The
+// written differently, or one the job's posting already had, isn't one (see activity.js); nor is one
+// copied from the same company's other job (copied: sent only with ?copies=1, for Assign numbers, where
+// it can be given out for the new opening). The
 // dashboard groups the rows person → course → company → job. Signed-in people with an allowed role.
 const CONTACT_FIELDS = ['phone', 'email'];
 // One follow-up as the dashboard gets it (student '': a remark made before anyone was given the number).
@@ -893,6 +953,8 @@ async function contactRows(range, keep = () => true) {
           job: 1,
           field: '$changes.field',
           value: '$changes.added',
+          // the same company's other job had it already: copied, not found (saveFollowUp)
+          copied: { $in: ['$changes.added', { $ifNull: ['$changes.known', []] }] },
         },
       },
     ]);
@@ -932,7 +994,8 @@ async function contactRows(range, keep = () => true) {
 
 router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
   const range = activityRange(req.query);
-  const [{ rows, truncated }, first] = await Promise.all([contactRows(range), Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean()]);
+  const keep = req.query.copies === '1' ? undefined : (row) => !row.copied;
+  const [{ rows, truncated }, first] = await Promise.all([contactRows(range, keep), Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean()]);
   res.json({
     days: range.days,
     from: range.from,
@@ -951,8 +1014,8 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
 // row is one number with one student: given to them in the period, or with feedback on their call recorded in
 // it. Plus one row (student '') for each number the team added in the period that no student has now (still
 // to give out); it also holds a remark recorded on the number before anyone was given it. Each row has: its
-// job; when the team added the number (if in the period); who found it (the person who added it to the job,
-// else the job post, else "earlier": before the record began); the latest time it was given to the student up
+// job; when the team added the number (if in the period); who found it (the person who added it to the job;
+// "copy": copied from the same company's other job; else the job post, else "earlier": before the record began); the latest time it was given to the student up
 // to the period's end (by whom, whether in the period; none if taken back since); the feedback recorded in the
 // period (the latest: its remark, by whom, when, and the hours since the number was given to the student);
 // the student's follow-up now; and how many students have the number now. The dashboard counts, groups and
@@ -986,7 +1049,7 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
   const contacts = new Map();
   const contactFor = (entry, field, value) => {
     const id = contactOf(entry.job.id, field, value);
-    if (!contacts.has(id)) contacts.set(id, { id, job: entry.job, field, value, finder: null, added: null, students: new Map(), calls: new Map() });
+    if (!contacts.has(id)) contacts.set(id, { id, job: entry.job, field, value, finder: null, copied: false, added: null, students: new Map(), calls: new Map() });
     return contacts.get(id);
   };
   const callOf = (contact, student) => {
@@ -998,10 +1061,14 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
     const by = person(entry.actor);
     for (const change of entry.changes) {
       if (CONTACT_FIELDS.includes(change.field)) {
-        // Added to the job by the team (a number only written differently isn't one: activity.js).
+        // Added to the job by the team (a number only written differently isn't one: activity.js), or copied
+        // from the same company's other job (known).
         for (const value of change.added ?? []) {
           const contact = contactFor(entry, change.field, value);
-          contact.finder ??= by;
+          if (!contact.finder && !contact.copied) {
+            if (change.known?.includes(value)) contact.copied = true;
+            else contact.finder = by;
+          }
           if (inPeriod(entry.at)) contact.added ??= { at: entry.at, by };
         }
       } else if (change.contact && change.field === 'contactStudent') {
@@ -1040,7 +1107,9 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
       field: contact.field,
       value: contact.value,
       key: contactKey(contact.field, contact.value),
-      found: contact.finder ? { source: 'team', by: contact.finder } : { source: inPost.has(contact.id) ? 'post' : 'earlier', by: null },
+      found: contact.finder
+        ? { source: 'team', by: contact.finder }
+        : { source: contact.copied ? 'copy' : inPost.has(contact.id) ? 'post' : 'earlier', by: null },
       added: contact.added,
       withStudents: withStudents.get(contact.id) ?? 0,
     };

@@ -5,8 +5,8 @@
 // companies that called in the last HOT_DAYS come first, marked (api/routes.js).
 
 import { COURSES } from './config/courses.js';
-import { Job, NonFilteredJob } from './models.js';
 import { companyKey, phoneKey } from './normalize.js';
+import { companySpellings, forgetCompanySpellings } from './sameCompany.js';
 
 export const HOT_DAYS = 7; // a company that called a student this recently is "hot" on Assign numbers
 export const LATE_DAYS = 7; // a call can be logged up to a week after it came
@@ -92,18 +92,9 @@ export function parseCallChange(body) {
 }
 
 // The companyKey of every stored job's company (kept and left out): which companies are "in our HR database".
-// Read again at most every PORTAL_MS (about 10,000 names take half a second to read).
-const PORTAL_MS = 2 * 60_000;
-let portal = null; // { keys, at }
-export async function portalKeys() {
-  if (portal && Date.now() - portal.at < PORTAL_MS) return portal.keys;
-  const names = (await Promise.all([Job, NonFilteredJob].map((J) => J.distinct('company', { company: { $nin: [null, ''] } })))).flat();
-  portal = { keys: new Set(names.map(companyKey).filter(Boolean)), at: Date.now() };
-  return portal.keys;
-}
-export const forgetPortalKeys = () => {
-  portal = null;
-};
+// Read again at most every 2 minutes (sameCompany.js).
+export const portalKeys = async () => new Set((await companySpellings()).keys());
+export const forgetPortalKeys = forgetCompanySpellings;
 
 // A stored call as the dashboard gets it, with whether its company is in our HR database now.
 export function callView(call, inPortal) {

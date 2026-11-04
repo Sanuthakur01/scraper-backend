@@ -354,7 +354,7 @@ const RUN = {
     const r = await callRoute('GET', '/jobs', { query: { id: args.job_id, days: 1 } });
     const job = r.items[0] ?? (await callRoute('GET', '/jobs', { query: { id: args.job_id, days: 1, view: 'nonfiltered' } })).items[0];
     if (!job) throw new Error('That job is no longer stored.');
-    const outcomes = (await callRoute('GET', '/performance', { query: { days: 366 } })).rows.filter((row) => String(row.job.id) === String(job._id) && row.outcomes.length);
+    const outcomes = (await callRoute('GET', '/performance', { query: { days: 366, copies: '1' } })).rows.filter((row) => String(row.job.id) === String(job._id) && row.outcomes.length);
     return {
       ...jobBrief(job),
       skills: job.skills ?? [],
@@ -455,7 +455,7 @@ const RUN = {
 
   async list_follow_ups(args, ctx) {
     const days = Math.min(Math.max(Number(args.days) || 30, 1), 366);
-    const r = await callRoute('GET', '/performance', { query: { days } });
+    const r = await callRoute('GET', '/performance', { query: { days, copies: '1' } }); // copied numbers are followed up too
     const course = courseOf(args.course);
     const person = String(args.person ?? '').toLowerCase();
     const status = args.status ?? 'all';

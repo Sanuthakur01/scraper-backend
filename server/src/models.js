@@ -186,6 +186,9 @@ const changeSchema = new mongoose.Schema(
     // contactStudent / contactRemark: which number or email; for contactRemark also whose call (student; '' or
     // missing: a remark made before anyone was given it, or from before a number could go to several students)
     contact: { type: new mongoose.Schema({ field: String, value: String, student: String }, { _id: false }), default: undefined },
+    // phone / email: of the values added, the ones the same company's other jobs already had (copied, not found:
+    // the Performance report doesn't count them)
+    known: { type: [String], default: undefined },
   },
   { _id: false },
 );
@@ -209,6 +212,11 @@ const activitySchema = new mongoose.Schema(
       course: String,
     },
     changes: { type: [changeSchema], required: true },
+    // "Use this HR": the HR contact was copied from this job of the same company (POST /jobs/:id/copy-hr)
+    copiedFrom: {
+      type: new mongoose.Schema({ id: mongoose.Schema.Types.ObjectId, set: String, title: String, company: String }, { _id: false }),
+      default: undefined,
+    },
   },
   { versionKey: false },
 );

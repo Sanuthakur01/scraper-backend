@@ -42,11 +42,11 @@ export const config = {
   retentionDays: int(process.env.RETENTION_DAYS, 90),
 
   // Only jobs whose minimum experience is within this range are kept. min 1 (since 24 Oct 2026; it was 2):
-  // "1-3 yrs" and "1-5 yrs" are kept, fresher jobs (0 years) are Non-filtered. max 5 (since 30 Oct 2026; no
-  // upper limit before): jobs asking for more than 5 years ("5+ yrs") are Non-filtered too.
+  // "1-3 yrs" and "1-6 yrs" are kept, fresher jobs (0 years) are Non-filtered. max 4 (since 4 Nov 2026; 5 from
+  // 30 Oct; no upper limit before): jobs asking for 5 years or more ("5+ yrs", "5-10 yrs") are Non-filtered too.
   experience: {
     min: int(process.env.EXPERIENCE_MIN, 1),
-    max: int(process.env.EXPERIENCE_MAX, 5),
+    max: int(process.env.EXPERIENCE_MAX, 4),
   },
 
   dedupeWindowDays: int(process.env.DEDUPE_WINDOW_DAYS, 14),

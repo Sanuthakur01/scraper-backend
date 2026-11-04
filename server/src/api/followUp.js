@@ -2,10 +2,10 @@
 // phone, email, remarks and the students it is assigned to, in the `manual` field, which only the dashboard writes, so a collection never overwrites it. The
 // collector also finds contacts written in the postings (foundPhones, foundEmails); what was typed in
 // is shown instead.
-// A phone number can be typed in only if no other job has it yet (findPhoneOwner).
+// A phone number can be typed in only if no other company's job has it yet (findPhoneOwner).
 
 import { Job, NonFilteredJob } from '../models.js';
-import { formatIndianPhone, phoneKey } from '../normalize.js';
+import { companyKey, formatIndianPhone, phoneKey } from '../normalize.js';
 
 export const PHONE_EXISTS = 'This number already exists.';
 
@@ -151,9 +151,11 @@ export function manualRecord({ hrNames = [], hrProfiles = [], foundBy = '', phon
 // Every phone number a stored job has, as phoneKeys: typed in, and found in its postings.
 export const phoneKeysOf = (job) => new Set([...(job.manual?.phoneKeys ?? []), ...(job.foundPhones ?? []).map(phoneKey)]);
 
-// Another job that already has one of these numbers, as { job, key }, or null: a kept job or a
-// non-filtered one, so a number is never on two jobs whichever view it was typed into. Numbers the job
-// itself already has don't count, so its details can be saved again (e.g. after changing only the remarks).
+// Another company's job that already has one of these numbers, as { job, key }, or null: a kept job or a
+// non-filtered one, so a number is never on two companies' jobs whichever view it was typed into. Numbers the job
+// itself already has don't count, so its details can be saved again (e.g. after changing only the remarks); nor do
+// the same company's other jobs (since 3 Nov 2026): its HR is the same for each of its openings ("Use this HR").
+const OWNERS_READ = 50;
 export async function findPhoneOwner(keys, job) {
   const own = phoneKeysOf(job);
   const fresh = keys.filter((k) => !own.has(k));
@@ -161,8 +163,39 @@ export async function findPhoneOwner(keys, job) {
   const asFound = fresh.filter((k) => k.length === 10).map(formatIndianPhone);
   const query = { _id: { $ne: job._id }, $or: [{ 'manual.phoneKeys': { $in: fresh } }, { foundPhones: { $in: asFound } }] };
   const fields = { title: 1, company: 1, foundPhones: 1, 'manual.phoneKeys': 1 };
-  const other = (await Job.findOne(query, fields).lean()) ?? (await NonFilteredJob.findOne(query, fields).lean());
+  const company = companyKey(job.company);
+  const otherCompany = (doc) => !company || companyKey(doc.company) !== company;
+  const other =
+    (await Job.find(query, fields).limit(OWNERS_READ).lean()).find(otherCompany) ??
+    (await NonFilteredJob.find(query, fields).limit(OWNERS_READ).lean()).find(otherCompany);
   if (!other) return null;
   const otherKeys = phoneKeysOf(other);
   return { job: other, key: fresh.find((k) => otherKeys.has(k)) };
+}
+
+// Of the phone numbers and emails added to a job ({ phone: [...], email: [...] } as written), the ones the same
+// company's other jobs already have, typed in or in their postings: copied, not found, so the Performance report
+// doesn't count them as new contacts (activity record: the change's `known`).
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const emailsIn = (text) => String(text ?? '').split(/\s*,\s*/).filter(Boolean);
+export async function sameCompanyValues(job, { phone = [], email = [] }) {
+  const company = companyKey(job.company);
+  const none = { phone: [], email: [] };
+  if (!company || (!phone.length && !email.length)) return none;
+  const keys = phone.map(phoneKey).filter(Boolean);
+  const asFound = keys.filter((k) => k.length === 10).map(formatIndianPhone);
+  const exactly = email.map((e) => new RegExp(`^${escapeRegex(e)}$`, 'i'));
+  const inList = email.map((e) => new RegExp(`(^|,\\s*)${escapeRegex(e)}(\\s*,|$)`, 'i'));
+  const or = [
+    ...(keys.length ? [{ 'manual.phoneKeys': { $in: keys } }, { foundPhones: { $in: asFound } }] : []),
+    ...(email.length ? [{ 'manual.email': { $in: inList } }, { foundEmails: { $in: exactly } }] : []),
+  ];
+  if (!or.length) return none;
+  const fields = { company: 1, foundPhones: 1, foundEmails: 1, 'manual.phoneKeys': 1, 'manual.email': 1 };
+  const docs = (await Promise.all([Job, NonFilteredJob].map((J) => J.find({ _id: { $ne: job._id }, $or: or }, fields).limit(OWNERS_READ).lean())))
+    .flat()
+    .filter((doc) => companyKey(doc.company) === company);
+  const phones = new Set(docs.flatMap((doc) => [...phoneKeysOf(doc)]));
+  const emails = new Set(docs.flatMap((doc) => [...emailsIn(doc.manual?.email), ...(doc.foundEmails ?? [])]).map((e) => e.toLowerCase()));
+  return { phone: phone.filter((p) => phones.has(phoneKey(p))), email: email.filter((e) => emails.has(e.toLowerCase())) };
 }

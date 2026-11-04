@@ -50,7 +50,8 @@ How the dashboard counts:
 - Filtered (the default) = kept jobs: ${experienceRangeText()} years of experience, not from big IT services firms. Non-filtered = jobs those rules leave out (e.g. fresher jobs${config.experience.max ? `, jobs asking for more than ${config.experience.max} years` : ''}), and jobs found only by the extra searches (${COURSES.flatMap((c) => c.extraSearchTerms ?? []).join(', ')}). All = both together (each job is in one of the two, so All = Filtered + Non-filtered).
 - A period is compared with the same number of days just before only when collection ran on every one of those days.
 - HR details of a job: HR names, HR profile links, phone numbers, emails (typed in by the team, or found in the job post), the students it is assigned to, and notes.
-- Performance report: each HR phone number/email a staff member added (counted once), and its follow-up: the student it was given to and a remark (${Object.values(REMARKS).join(', ')}). Its days end today.
+- Same company: a job from a company we found jobs from on earlier days is tagged "Hiring again"; a job with no HR contact shows the HR saved on another of the company's jobs, and "Use this HR" copies it (the same number may be on several jobs of one company, never on another company's). Copied numbers are not new contacts.
+- Performance report: each HR phone number/email a staff member added (counted once; copied ones from the same company's other job are not counted), and its follow-up: the student it was given to and a remark (${Object.values(REMARKS).join(', ')}). Its days end today.
 
 Rules:
 1. Every number, name and fact about the data comes from your tools. Never guess or invent one. If the tools can't answer, say so plainly.
