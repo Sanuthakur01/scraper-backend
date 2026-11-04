@@ -4,7 +4,7 @@
 //
 // A person's role is in their Clerk public metadata, e.g. { "role": "RESEARCH_TEAM" }.
 
-export const ROLES = ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM'];
+export const ROLES = ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM', 'STUDENT_MANAGEMENT'];
 
 // view             - read the dashboard's data (here: the activity record)
 // edit-hr-details  - add or change a job's HR phone numbers, emails, students and notes
@@ -16,6 +16,7 @@ export const PERMISSIONS = {
   ADMIN: ['view', 'edit-hr-details', 'record-outcomes', 'view-ai-usage', 'add-jobs'],
   PLACEMENT_STAFF: ['view', 'edit-hr-details', 'record-outcomes', 'add-jobs'],
   RESEARCH_TEAM: ['view', 'edit-hr-details', 'record-outcomes', 'add-jobs'],
+  STUDENT_MANAGEMENT: ['view', 'edit-hr-details', 'record-outcomes', 'add-jobs'], // since 4 Nov 2026, as Placement staff
 };
 
 // The role written in public metadata, as typed there.

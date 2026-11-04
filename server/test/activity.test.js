@@ -121,8 +121,8 @@ test("sign-in check with Clerk's real verifyToken: a valid token gets in, an exp
   assert.equal(await status(sign({ ...claims, azp: 'https://elsewhere.example.com' })), 401, 'from another site');
 });
 
-test('the server knows the same four roles and permissions as the dashboard', () => {
-  for (const role of ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM']) {
+test('the server knows the same five roles and permissions as the dashboard', () => {
+  for (const role of ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM', 'STUDENT_MANAGEMENT']) {
     assert.equal(roleFrom({ role }), role);
     assert.ok(can(role, 'view') && can(role, 'edit-hr-details'), role);
   }
