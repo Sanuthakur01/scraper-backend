@@ -5,9 +5,11 @@
 //   - A kept job the rules now leave out moves to the non-filtered jobs, and a non-filtered job the
 //     rules now keep moves to the kept jobs, with everything in it (HR details too). Nothing else is lost.
 //   - Each job's course, experience group and (non-filtered) reason are brought up to date.
+//   - A job the team added by hand (addedBy) is never removed and keeps the course the staff chose; it moves
+//     between the sets by addedJobReason (experience not stated doesn't leave it out).
 // dryRun: count what would change, change nothing.
 import { classifyTitle } from './classify.js';
-import { leftOutReason, nonFilteredReason } from './config/filters.js';
+import { addedJobReason, leftOutReason, nonFilteredReason } from './config/filters.js';
 import { Job, NonFilteredJob } from './models.js';
 import { experienceBand } from './normalize.js';
 
@@ -30,7 +32,8 @@ export async function reclassifyJobs({ dryRun = false } = {}) {
 
   for (const [model, isKept] of [[Job, true], [NonFilteredJob, false]]) {
     for await (const job of model.find({}).lean().cursor()) {
-      const course = classifyTitle(job.title);
+      const added = Boolean(job.addedBy); // added by hand: its course is the staff's choice
+      const course = added ? job.course : classifyTitle(job.title);
       if (!course) {
         if (job.manual) counts.keptManual++;
         else {
@@ -50,7 +53,7 @@ export async function reclassifyJobs({ dryRun = false } = {}) {
         counts.bandChanged++;
       }
       // A non-filtered job an extra search found stays non-filtered ('extra-search') when it passes the rules.
-      const reason = isKept ? leftOutReason(job) : nonFilteredReason(job);
+      const reason = added ? addedJobReason(job) : isKept ? leftOutReason(job) : nonFilteredReason(job);
       const label = `"${job.title}" at ${job.company || 'company not shown'}`;
       if (isKept && reason) {
         counts.toNonFiltered[reason]++;

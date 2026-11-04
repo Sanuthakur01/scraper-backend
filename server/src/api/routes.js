@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import express from 'express';
 import { config } from '../config.js';
 import { COURSES } from '../config/courses.js';
-import { EXCLUDED_COMPANIES, overExperienceText, underExperienceText } from '../config/filters.js';
+import { addedJobReason, EXCLUDED_COMPANIES, overExperienceText, underExperienceText } from '../config/filters.js';
 import { enabledSources } from '../config/sources.js';
 import { Activity, CollectorRun, ContactOutcome, IncomingCall, Job, NonFilteredJob, STUDENT_COLLATION } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
@@ -12,7 +12,8 @@ import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.j
 import { hiringPartners } from '../companies.js';
 import { skillGaps, skillPlan } from '../skillGaps.js';
 import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, jobRow, manualRecord, MAX_STUDENTS, parseFollowUpInput, PHONE_EXISTS, phoneKeysOf, sameCompanyValues } from './followUp.js';
-import { hasTypedHr, sameCompanyOf } from '../sameCompany.js';
+import { companySpellings, forgetCompanySpellings, hasTypedHr, sameCompanyOf } from '../sameCompany.js';
+import { addedJobDoc, checkAddedJob, findDuplicate, findEarlierInOtherSet, parseAddedJobInput, TEAM_PLATFORM } from '../addedJobs.js';
 // The HR contact details "Found by" is about (activity.js field names).
 const CONTACT_DETAILS = ['hrName', 'hrProfile', 'phone', 'email'];
 import { searchEverything } from './search.js';
@@ -125,7 +126,11 @@ async function dayRange(days) {
 
 // Used both to count what the dashboard shows (cards, charts) and to list the jobs behind a number
 // (the job list's filters below), so a number and its list always agree.
-const ON_SEVERAL_SITES = { 'platforms.1': { $exists: true } };
+// Listed on 2+ job sites: "Added by team" is not one (a job added by hand that a collection found on one site is
+// on one site). It is in a job's platforms at most once, so: 3 or more entries, or 2 without it.
+const ON_SEVERAL_SITES = {
+  $or: [{ 'platforms.2': { $exists: true } }, { 'platforms.1': { $exists: true }, platforms: { $ne: TEAM_PLATFORM } }],
+};
 // HR details: an HR name, profile link, phone, email or note typed in, or a phone or email found in the
 // posting. Students assigned alone don't count.
 const typedIn = (field) => ({ [`manual.${field}`]: { $nin: [null, ''] } });
@@ -218,7 +223,7 @@ function jobFilter(query, { start, end }) {
   if (query.skill) filter.skills = String(query.skill);
   if (query.exp) filter.experienceBand = String(query.exp);
   if (POSTING_AGES.includes(query.age)) filter.$expr = { $eq: [POSTING_AGE, query.age] };
-  if (query.sites === '2') Object.assign(filter, ON_SEVERAL_SITES);
+  if (query.sites === '2') filter.$and = [...(filter.$and ?? []), ON_SEVERAL_SITES]; // its $or is not the search's
   if (query.salary === 'shown') Object.assign(filter, SALARY_SHOWN);
   // hr: 'none' = no HR details yet, 'some' = has them (the same test as the job list's withContact).
   if (query.hr === 'none') filter.$nor = [HAS_HR_DETAILS];
@@ -624,7 +629,7 @@ router.get('/role-jobs', requirePermission('view'), wrap(async (req, res) => {
   // The same number for the period before (in the view's set), when the two can be compared.
   const prevStart = new Date(range.start.getTime() - range.days * DAY_MS);
   const [items, filtered, nonFiltered, comparable] = await Promise.all([
-    J.find(match, JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
+    J.find(match, SIGNED_IN_JOB_FIELDS).sort(JOB_SORT).skip((page - 1) * pageSize).limit(pageSize).lean(),
     Job.countDocuments(match),
     NonFilteredJob.countDocuments(match),
     collectedEveryDay(prevStart, range.end),
@@ -670,7 +675,7 @@ router.get('/companies/jobs', requirePermission('view'), wrap(async (req, res) =
       const spellings = (await J.distinct('company', window)).filter((name) => companyKey(name) === key);
       if (!spellings.length) return { items: [], total: 0 };
       const filter = { ...window, company: { $in: spellings } };
-      const [items, total] = await Promise.all([J.find(filter, JOB_FIELDS).sort(JOB_SORT).limit(COMPANY_JOBS_MAX).lean(), J.countDocuments(filter)]);
+      const [items, total] = await Promise.all([J.find(filter, SIGNED_IN_JOB_FIELDS).sort(JOB_SORT).limit(COMPANY_JOBS_MAX).lean(), J.countDocuments(filter)]);
       return { items, total };
     }),
   );
@@ -687,16 +692,20 @@ router.get('/companies/jobs', requirePermission('view'), wrap(async (req, res) =
 // The search box on the dashboard: companies, HR names, phone numbers and emails, in kept and left-out
 // jobs alike (search.js). ?q= at least 2 letters or 3 digits. Signed in only.
 router.get('/search', requirePermission('view'), wrap(async (req, res) => {
-  res.json(await searchEverything(String(req.query.q ?? ''), { fields: JOB_FIELDS }));
+  res.json(await searchEverything(String(req.query.q ?? ''), { fields: SIGNED_IN_JOB_FIELDS }));
 }));
 
 // ---------- Job lists ----------
 
+// addedBy: who added the job by hand (src/addedJobs.js): their name and when, never their Clerk user id. Their email
+// only on the routes that need a sign-in (SIGNED_IN_JOB_FIELDS): /jobs and /jobs.csv don't, yet.
 const JOB_FIELDS = {
   title: 1, company: 1, course: 1, cities: 1, experienceMin: 1, experienceMax: 1,
   experienceText: 1, experienceBand: 1, salaryText: 1, skills: 1, postedAt: 1, firstSeenAt: 1,
   primaryPlatform: 1, platforms: 1, links: 1, foundPhones: 1, foundEmails: 1, manual: 1, leftOutBy: 1,
+  'addedBy.name': 1, 'addedBy.at': 1,
 };
+const SIGNED_IN_JOB_FIELDS = { ...JOB_FIELDS, 'addedBy.email': 1 };
 const JOB_SORT = { firstSeenAt: -1, postedAt: -1, _id: 1 };
 
 router.get('/jobs', wrap(async (req, res) => {
@@ -749,11 +758,20 @@ async function withSameCompany(docs) {
 // postings say, if anything). The collector never writes these, so the next run can't undo them. A kept job or a
 // non-filtered one (ids are unique across both). Every change is recorded under `person` (Activity); numbers and
 // emails the same company's other jobs already have are marked in it (`known`: copied, not found). copiedFrom: the
-// same company's job the HR contact was copied from ("Use this HR"; Found by isn't needed then). Returns
-// { job } or, when refused, { status, error, detail? }: 404 the job is gone; 409 PHONE_EXISTS, a number another
-// company's job already has (`detail` says which); 400 FOUND_BY_REQUIRED.
+// same company's job the HR contact was copied from ("Use this HR"; Found by isn't needed then). newJob: the job was
+// just added by hand (POST /added-jobs), { url, newCompany }: recorded with the record, which is then written even
+// when no HR contact came with it. Returns { job, known } (known: { phone, email }, the added numbers and emails the
+// same company's other jobs already have, as recorded: not new contacts) or, when refused, { status, error, detail? }:
+// 404 the job is gone; 409 PHONE_EXISTS, a number another company's job already has (`detail` says which); 400
+// FOUND_BY_REQUIRED. Once the job is saved it never fails: a failed same-company look-up only leaves that part out.
 const JOB_GONE = 'Job not found. It may have been removed.';
-async function saveFollowUp(id, value, person, via, { copiedFrom } = {}) {
+// The refusal for a number another company's job already has (findPhoneOwner's answer), saying which job.
+const phoneTaken = (owner, phones) => {
+  const number = phones.split(', ').find((p) => phoneKey(p) === owner.key);
+  const where = `"${owner.job.title}"${owner.job.company ? ` at ${owner.job.company}` : ''}`;
+  return { status: 409, error: PHONE_EXISTS, detail: `${number} is already saved on ${where}.` };
+};
+async function saveFollowUp(id, value, person, via, { copiedFrom, newJob } = {}) {
   const fields = { foundPhones: 1, foundEmails: 1, manual: 1, title: 1, company: 1, course: 1 };
   let model = Job;
   let current = await Job.findById(id, fields).lean();
@@ -763,11 +781,7 @@ async function saveFollowUp(id, value, person, via, { copiedFrom } = {}) {
   }
   if (!current) return { status: 404, error: JOB_GONE };
   const owner = await findPhoneOwner(value.phoneKeys, current);
-  if (owner) {
-    const number = value.phone.split(', ').find((p) => phoneKey(p) === owner.key);
-    const where = `"${owner.job.title}"${owner.job.company ? ` at ${owner.job.company}` : ''}`;
-    return { status: 409, error: PHONE_EXISTS, detail: `${number} is already saved on ${where}.` };
-  }
+  if (owner) return phoneTaken(owner, value.phone);
 
   const now = new Date();
   // Found by: the one chosen, else the one stored. Adding or changing HR contact details needs one; saving only
@@ -786,21 +800,22 @@ async function saveFollowUp(id, value, person, via, { copiedFrom } = {}) {
   for (const change of changes) if (known[change.field]?.length) change.known = known[change.field];
   // The record is written first, so a change is never saved without one. If the save then fails, the
   // record goes again.
-  const entry = changes.length
+  const entry = changes.length || newJob
     ? await Activity.create({
         at: now,
         actor: person,
         ...(via ? { via } : {}),
-        action: overallAction(changes),
+        action: newJob ? 'added' : overallAction(changes),
         job: { id: current._id, set: model === Job ? 'filtered' : 'nonfiltered', title: current.title, company: current.company, course: current.course },
         changes,
         ...(copiedFrom ? { copiedFrom } : {}),
+        ...(newJob ? { newJob } : {}),
       })
     : null;
   const undoRecord = () => (entry ? Activity.deleteOne({ _id: entry._id }).catch((err) => console.error(`Could not remove activity ${entry._id}: ${err.message}`)) : null);
   let job;
   try {
-    job = await model.findByIdAndUpdate(id, update, { returnDocument: 'after', projection: JOB_FIELDS }).lean();
+    job = await model.findByIdAndUpdate(id, update, { returnDocument: 'after', projection: SIGNED_IN_JOB_FIELDS }).lean();
   } catch (err) {
     await undoRecord();
     throw err;
@@ -809,7 +824,14 @@ async function saveFollowUp(id, value, person, via, { copiedFrom } = {}) {
     await undoRecord();
     return { status: 404, error: JOB_GONE };
   }
-  return { job: (await withSameCompany([job]))[0] };
+  let row;
+  try {
+    row = (await withSameCompany([job]))[0];
+  } catch (err) {
+    console.error(`Same-company look-up failed for job ${id}: ${err.message}`);
+    row = jobRow(job);
+  }
+  return { job: row, known };
 }
 
 // The HR details typed in for one job, from its details window. Only a signed-in person whose role may edit HR
@@ -865,7 +887,8 @@ router.post('/jobs/:id/copy-hr', requirePermission('edit-hr-details'), express.j
 }));
 
 // The activity record: who changed which job's HR details, when, and what changed. Newest first.
-// Filters: ?job=<id> · ?email= one person · ?action=added|edited|removed · ?q= words in the job title or
+// Filters: ?job=<id> · ?email= one person · ?action=added|edited|removed, or new-job (the jobs added by hand:
+// records with newJob) · ?q= words in the job title or
 // company. ?limit= (at most 200). ?before= the `next` of the page before (its last record's time and id).
 // The first page also says how many records match (total) and who has made changes (people).
 // Only for signed-in people with an allowed role.
@@ -879,6 +902,7 @@ router.get('/activity', requirePermission('view'), wrap(async (req, res) => {
   }
   if (req.query.email) filter['actor.email'] = new RegExp(`^${escapeRegex(String(req.query.email).trim())}$`, 'i');
   if (ACTIONS.includes(req.query.action)) filter.action = req.query.action;
+  if (req.query.action === 'new-job') filter.newJob = { $exists: true };
   const search = String(req.query.q ?? '').trim();
   if (search) {
     const rx = new RegExp(escapeRegex(search), 'i');
@@ -1302,6 +1326,182 @@ router.delete('/incoming-calls/:id', requirePermission('record-outcomes'), wrap(
   res.json({ removed: true });
 }));
 
+// ---------- Jobs added by the team ----------
+
+// An opening the collector missed, added by hand (src/addedJobs.js): a job like any other, on the site "Added by
+// team", in Filtered or Non-filtered by the keep rules (experience not stated doesn't leave it out), with who added it
+// (addedBy). The HR contact typed with it is saved as any job's HR details are (saveFollowUp), so the number rules,
+// Found by and the Performance report work the same, and its activity record says the job itself was added (newJob).
+
+// While the form is filled in: the course its title fits, the job site its link is, where it will go (Filtered, or
+// Non-filtered and why), whether the company is in the HR database, and the same posting (duplicate) or the company's
+// same opening (similar) stored already. Needs add-jobs.
+router.get('/added-jobs/check', requirePermission('add-jobs'), wrap(async (req, res) => {
+  res.json(await checkAddedJob(req.query));
+}));
+
+const DUPLICATE_JOB = 'This job is already in the HR database.';
+// The refusal for a posting stored already (findDuplicate's answer), saying where it is.
+const duplicateAnswer = (match) => {
+  const where = match.set === 'filtered' ? 'Filtered' : `Non-filtered${match.leftOutBy ? ` (${LEFT_OUT_REASONS[match.leftOutBy] ?? match.leftOutBy})` : ''}`;
+  return { error: DUPLICATE_JOB, detail: `"${match.title}"${match.company ? ` at ${match.company}` : ''}, in ${where}.`, job: { _id: match._id, set: match.set } };
+};
+
+// Adds the job (parseAddedJobInput), then its HR contact (saveFollowUp), recorded under the person. Refused with
+// nothing stored: a wrong box (400, the message starts with the box's name); the same posting stored already (409,
+// with that job); a number another company's job has (409 PHONE_EXISTS). Answers 201 with the job's row, its set and
+// `known` (saveFollowUp: the numbers and emails the same company's other jobs already have, not counted as new).
+router.post('/added-jobs', requirePermission('add-jobs'), express.json({ limit: '10kb' }), wrap(async (req, res) => {
+  const input = parseAddedJobInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const value = input.value;
+  const duplicate = await findDuplicate(value.url);
+  if (duplicate) return res.status(409).json(duplicateAnswer(duplicate));
+  // The number check for a job not stored yet, of this company (the same company's other jobs may have the number).
+  const owner = await findPhoneOwner(value.hr.phoneKeys, { _id: new mongoose.Types.ObjectId(), company: value.company });
+  if (owner) {
+    const { error, detail } = phoneTaken(owner, value.hr.phone);
+    return res.status(409).json({ error, detail });
+  }
+
+  const leftOutBy = addedJobReason({ company: value.company, experienceMin: value.experience?.min ?? null });
+  const model = leftOutBy ? NonFilteredJob : Job;
+  const set = leftOutBy ? 'nonfiltered' : 'filtered';
+  // A company new to the HR database: no job of it in either set before this one (read now, not the kept names).
+  forgetCompanySpellings();
+  const newCompany = !(await companySpellings()).has(value.companyKey);
+  // Its id just before it is stored: of two jobs stored at the same moment, the first has the smaller id.
+  const _id = new mongoose.Types.ObjectId();
+  const doc = addedJobDoc(value, { _id, person: req.person, now: new Date(), leftOutBy });
+  try {
+    await model.create(doc);
+  } catch (err) {
+    if (err?.code !== 11000) throw err;
+    // The same listing or link was stored a moment ago (by someone else, or by the collector).
+    const stored = await findDuplicate(value.url);
+    return res.status(409).json(stored ? duplicateAnswer(stored) : { error: DUPLICATE_JOB });
+  }
+  forgetCompanySpellings();
+  // The job goes again, with any activity record of it, if it can't stay (e.g. its number was saved on another job
+  // just now). Its id is this request's own, so these records are this request's.
+  const undo = () =>
+    Promise.all([model.deleteOne({ _id }), Activity.deleteMany({ 'job.id': _id })]).then(forgetCompanySpellings, (err) =>
+      console.error(`Could not remove added job ${_id}: ${err.message}`),
+    );
+  let saved;
+  try {
+    // Someone saved the same posting to the other set at the same moment, first: theirs stays.
+    const earlier = await findEarlierInOtherSet(doc, set);
+    if (earlier) {
+      await undo();
+      return res.status(409).json(duplicateAnswer(earlier));
+    }
+    saved = await saveFollowUp(String(_id), value.hr, req.person, req.via, { newJob: { url: value.url, newCompany } });
+  } catch (err) {
+    await undo();
+    throw err;
+  }
+  if (saved.error) {
+    await undo();
+    return res.status(saved.status).json({ error: saved.error, ...(saved.detail ? { detail: saved.detail } : {}) });
+  }
+  res.status(201).json({ job: saved.job, set, known: saved.known });
+}));
+
+// The jobs added by hand in a period whose days end today (as in the Performance report; ?days= or ?from=&to=), by
+// when they were added, the latest first (at most MAX_ADDED_JOBS), each with its set; how many there are in each set,
+// how many of those listed came with HR contact (withHr), and who added how many. Signed-in people only.
+const MAX_ADDED_JOBS = 500;
+router.get('/added-jobs', requirePermission('view'), wrap(async (req, res) => {
+  const range = activityRange(req.query);
+  const match = { 'addedBy.at': { $exists: true, $gte: range.start, $lt: range.end } };
+  const sets = [['filtered', Job], ['nonfiltered', NonFilteredJob]];
+  const [found, [filtered, nonfiltered], byPerson] = await Promise.all([
+    Promise.all(
+      sets.map(([set, J]) =>
+        J.find(match, SIGNED_IN_JOB_FIELDS)
+          .sort({ 'addedBy.at': -1, _id: 1 })
+          .limit(MAX_ADDED_JOBS)
+          .lean()
+          .then((docs) => docs.map((doc) => ({ doc, set }))),
+      ),
+    ),
+    Promise.all(sets.map(([, J]) => J.countDocuments(match))),
+    Promise.all(
+      sets.map(([, J]) =>
+        J.aggregate([{ $match: match }, { $sort: { 'addedBy.at': 1 } }, { $group: { _id: { $toLower: '$addedBy.email' }, name: { $last: '$addedBy.name' }, count: { $sum: 1 } } }]),
+      ),
+    ),
+  ]);
+  const listed = found
+    .flat()
+    .sort((a, b) => b.doc.addedBy.at - a.doc.addedBy.at || String(a.doc._id).localeCompare(String(b.doc._id)))
+    .slice(0, MAX_ADDED_JOBS);
+  // Each person once, over both sets (the name they had on their latest one).
+  const people = new Map();
+  for (const p of byPerson.flat()) {
+    const known = people.get(p._id);
+    people.set(p._id, { email: p._id, name: known?.name || p.name || '', count: (known?.count ?? 0) + p.count });
+  }
+  const rows = await withSameCompany(listed.map(({ doc }) => doc));
+  res.json({
+    from: range.from,
+    to: range.to,
+    total: filtered + nonfiltered,
+    filtered,
+    nonfiltered,
+    withHr: listed.filter(({ doc }) => hasTypedHr(doc.manual)).length,
+    people: [...people.values()].sort((a, b) => b.count - a.count || (a.name || a.email).localeCompare(b.name || b.email)),
+    items: rows.map((row, i) => ({ ...row, set: listed[i].set })),
+  });
+}));
+
+// Removes a job added by mistake, from whichever set holds it: by the person who added it, or an admin, and only
+// while it is on no other site (once the collector has found it too, it stays). Its HR contact goes with it; the
+// activity record keeps what was added, and records the removal. Needs add-jobs. Answers 204.
+router.delete('/added-jobs/:id', requirePermission('add-jobs'), wrap(async (req, res) => {
+  if (!/^[a-f\d]{24}$/i.test(req.params.id)) return res.status(404).json({ error: JOB_GONE });
+  const fields = { title: 1, company: 1, course: 1, platforms: 1, links: 1, addedBy: 1 };
+  let model = Job;
+  let job = await Job.findById(req.params.id, fields).lean();
+  if (!job) {
+    model = NonFilteredJob;
+    job = await NonFilteredJob.findById(req.params.id, fields).lean();
+  }
+  if (!job) return res.status(404).json({ error: JOB_GONE });
+  if (!job.addedBy) return res.status(400).json({ error: 'Only jobs added by the team can be removed here.' });
+  const own = String(job.addedBy.email ?? '').toLowerCase() === String(req.person.email ?? '').toLowerCase();
+  if (!own && !ADMINS.includes(req.person.role)) return res.status(403).json({ error: 'Only the person who added this job, or an admin, can remove it.' });
+  const foundToo = () => res.status(409).json({ error: 'The scraper has found this job too, so it stays on the dashboard.' });
+  if ((job.platforms ?? []).some((p) => p !== TEAM_PLATFORM)) return foundToo();
+
+  // As for HR details: the record first, so nothing goes without one; removed again if the job stays.
+  const entry = await Activity.create({
+    at: new Date(),
+    actor: req.person,
+    ...(req.via ? { via: req.via } : {}),
+    action: 'removed',
+    job: { id: job._id, set: model === Job ? 'filtered' : 'nonfiltered', title: job.title, company: job.company, course: job.course },
+    changes: [],
+    removedJob: { url: job.links?.[TEAM_PLATFORM] ?? '' },
+  });
+  const undoRecord = () => Activity.deleteOne({ _id: entry._id }).catch((err) => console.error(`Could not remove activity ${entry._id}: ${err.message}`));
+  let removed;
+  try {
+    // Only while it is still on no other site: a collection may have found it a moment ago.
+    removed = await model.deleteOne({ _id: job._id, platforms: [TEAM_PLATFORM] });
+  } catch (err) {
+    await undoRecord();
+    throw err;
+  }
+  if (!removed.deletedCount) {
+    await undoRecord();
+    return (await model.exists({ _id: job._id })) ? foundToo() : res.status(404).json({ error: JOB_GONE });
+  }
+  forgetCompanySpellings();
+  res.status(204).end();
+}));
+
 // Every student name used so far (jobs' "Assigned to" lists, the report's assignments and the incoming calls),
 // each once, A–Z.
 async function knownStudents() {
@@ -1460,9 +1660,10 @@ router.get('/jobs.csv', wrap(async (req, res) => {
   // Non-filtered and All say why each left-out job is left out (a kept job's cell is empty).
   const view = viewOf(req);
   const withReason = view !== 'filtered';
+  // Added by: who added the job by hand (empty for the collected ones).
   const header = [
     'First seen (IST)', 'Posted (IST)', 'Course', 'Title', 'Company', 'Cities', 'Experience', 'Salary', 'Listed on',
-    'HR name', 'HR profile', 'Phone', 'Email', 'Assigned to', 'Remarks', ...(withReason ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
+    'HR name', 'HR profile', 'Phone', 'Email', 'Assigned to', 'Remarks', 'Added by', ...(withReason ? ['Left out because'] : []), ...platforms.map((p) => `${p} link`),
   ];
   const lines = jobs.map(jobRow).map((job) =>
     [
@@ -1481,6 +1682,7 @@ router.get('/jobs.csv', wrap(async (req, res) => {
       job.contact.email,
       job.contact.assignedTo.join('; '),
       job.contact.remarks,
+      job.addedBy ? job.addedBy.name || 'Team member' : '', // never their email: this file needs no sign-in
       ...(withReason ? [LEFT_OUT_REASONS[job.leftOutBy] ?? ''] : []),
       ...platforms.map((p) => job.links?.[p] ?? ''),
     ]

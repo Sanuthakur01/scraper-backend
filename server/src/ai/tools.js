@@ -198,10 +198,10 @@ export const TOOLS = [
   ),
   tool(
     'get_activity',
-    'The activity record: who added, changed or removed which HR details, students and follow-ups, and when. Newest first.',
+    "The activity record: who added, changed or removed which HR details, students and follow-ups, and when; also the jobs the team added by hand (openings the collector missed) and removed again. Newest first. A record with jobAddedByHand: the job itself was added (newCompany: its company was new to the HR database), with any HR contact typed with it in changes. jobAddedByHandRemoved: that job was deleted, not its HR details.",
     {
       days: { type: 'integer', description: 'Only the last N days.' },
-      action: { type: 'string', enum: ['added', 'edited', 'removed'] },
+      action: { type: 'string', enum: ['added', 'edited', 'removed', 'new-job'], description: "'new-job': only the jobs added by hand." },
       q: { type: 'string', description: 'Words in the job title or company.' },
       person: { type: 'string', description: 'Part of a staff name.' },
       limit: { type: 'integer', description: '1-20, default 10.' },
@@ -508,6 +508,9 @@ const RUN = {
         viaIjfAi: i.via === 'ai',
         job: `${i.job.title} at ${i.job.company ?? ''}`,
         changes: i.changes.map((c) => ({ field: c.field, change: c.change, before: c.before, after: c.after, about: c.contact?.value })),
+        // Only on the records of a job added by hand, or removed again.
+        ...(i.newJob ? { jobAddedByHand: { link: i.newJob.url, newCompany: Boolean(i.newJob.newCompany) } } : {}),
+        ...(i.removedJob ? { jobAddedByHandRemoved: { link: i.removedJob.url } } : {}),
       })),
     };
   },

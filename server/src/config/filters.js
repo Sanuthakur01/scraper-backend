@@ -42,6 +42,13 @@ export function leftOutReason({ company, experienceMin }) {
   return experienceReason(experienceMin);
 }
 
+// A job the team added by hand (addedBy, src/addedJobs.js): the same rules, except that experience not stated
+// doesn't leave it out (the staff vouch for the opening). null = a Filtered job; else its Non-filtered leftOutBy.
+export const addedJobReason = (job) => {
+  const reason = leftOutReason(job);
+  return reason === 'no-experience' ? null : reason;
+};
+
 // A non-filtered job's leftOutBy: what the keep rules say, else 'extra-search' when it passes them but an
 // extra search found it and no main search kept it (fromExtraSearch; extraSearchTerms in config/courses.js).
 export const nonFilteredReason = (job) => leftOutReason(job) ?? (job.fromExtraSearch ? 'extra-search' : null);

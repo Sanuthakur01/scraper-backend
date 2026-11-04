@@ -79,6 +79,9 @@ export function createClerkIdentify({ secretKey, authorizedParties = [], verify 
   };
 }
 
+// What a role without the permission is told (any other permission: "Your role can't see this.").
+const REFUSALS = { 'edit-hr-details': "Your role can't change HR details.", 'add-jobs': "Your role can't add jobs." };
+
 // Express middleware: only a signed-in person whose role has `permission` gets through; they are on
 // req.person afterwards. identify comes from app.locals (see createApp).
 export function requirePermission(permission) {
@@ -89,9 +92,7 @@ export function requirePermission(permission) {
         return res.status(403).json({ error: "Your account doesn't have a role that can use the dashboard. Ask an admin to set it in Clerk." });
       }
       if (!can(person.role, permission)) {
-        return res.status(403).json({
-          error: permission === 'edit-hr-details' ? "Your role can't change HR details." : "Your role can't see this.",
-        });
+        return res.status(403).json({ error: REFUSALS[permission] ?? "Your role can't see this." });
       }
       req.person = person;
       next();

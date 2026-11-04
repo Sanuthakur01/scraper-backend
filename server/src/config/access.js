@@ -10,11 +10,12 @@ export const ROLES = ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM'
 // edit-hr-details  - add or change a job's HR phone numbers, emails, students and notes
 // record-outcomes  - in the performance report: give an HR number or email to a student, and record how it went
 // view-ai-usage    - see how much each person uses IJF AI (questions, tokens)
+// add-jobs         - add a job opening the collector missed (with its HR contact), and remove one they added
 export const PERMISSIONS = {
-  SUPER_ADMIN: ['view', 'edit-hr-details', 'record-outcomes', 'view-ai-usage'],
-  ADMIN: ['view', 'edit-hr-details', 'record-outcomes', 'view-ai-usage'],
-  PLACEMENT_STAFF: ['view', 'edit-hr-details', 'record-outcomes'],
-  RESEARCH_TEAM: ['view', 'edit-hr-details', 'record-outcomes'],
+  SUPER_ADMIN: ['view', 'edit-hr-details', 'record-outcomes', 'view-ai-usage', 'add-jobs'],
+  ADMIN: ['view', 'edit-hr-details', 'record-outcomes', 'view-ai-usage', 'add-jobs'],
+  PLACEMENT_STAFF: ['view', 'edit-hr-details', 'record-outcomes', 'add-jobs'],
+  RESEARCH_TEAM: ['view', 'edit-hr-details', 'record-outcomes', 'add-jobs'],
 };
 
 // The role written in public metadata, as typed there.

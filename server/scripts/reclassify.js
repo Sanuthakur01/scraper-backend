@@ -5,6 +5,7 @@
 //     kept jobs the rules now leave out move to the non-filtered jobs, and non-filtered jobs the rules
 //     now keep move to the kept jobs
 // Jobs someone typed HR details into are never removed; when they move, the details move with them.
+// Jobs the team added by hand are never removed either, and keep the course the staff chose.
 // Run with --dry-run to only print what would change.
 import { connectDb, disconnectDb } from '../src/db.js';
 import { experienceRangeText } from '../src/config/filters.js';

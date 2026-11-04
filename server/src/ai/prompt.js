@@ -5,6 +5,7 @@ import { COURSES } from '../config/courses.js';
 import { config } from '../config.js';
 import { experienceRangeText } from '../config/filters.js';
 import { REMARKS } from '../outcomes.js';
+import { TEAM_PLATFORM } from '../addedJobs.js';
 
 const IST = 'Asia/Kolkata';
 const fmt = (date, options) => new Intl.DateTimeFormat('en-IN', { timeZone: IST, ...options }).format(date);
@@ -22,7 +23,10 @@ const PAGES = [
   ['/interviews', "the Interviews page (students' interviews from the staff's interview sheet: company, time, round, room; per-course counts; round and rescheduled filters; rescheduled ones are listed but not counted)"],
   ['/incoming-calls', "the Incoming calls page (HR calls to our students logged by the team: company, HR number, student, course, outcome; whether each company is in our HR database)"],
   ['/cv-shared','the CV shared page (every call that ended in CV shared: the student, the company and job, who found and gave out the number)'],
+  ['/added-jobs', 'the Jobs added by the team page (openings the collector missed, added by hand by the staff: who added each and when, its course, Filtered or Non-filtered, its HR contact; Filtered and Non-filtered together, by the day they were added)'],
 ];
+// Pages that list Filtered and Non-filtered jobs together, by days that end today (not the latest collection day).
+const BOTH_SETS = ['/added-jobs'];
 
 // The page the person asked from, in words ("the Data Analyst course page, last 7 days, Filtered").
 export function describePage(context = {}) {
@@ -32,8 +36,11 @@ export function describePage(context = {}) {
     : path === '/'
       ? "the Home page (today's numbers: job postings added, HR contacts found, CVs shared)"
       : (PAGES.find(([prefix]) => path.startsWith(prefix))?.[1] ?? 'the Dashboard (all courses)');
+  const both = BOTH_SETS.some((prefix) => path.startsWith(prefix));
   const p = context.period ?? {};
-  const period = p.from ? (p.from === p.to ? `the day ${p.from}` : `${p.from} to ${p.to}`) : p.days === 1 ? 'the latest day' : p.days ? `the last ${p.days} days` : '';
+  const latest = both ? 'today' : 'the latest day';
+  const period = p.from ? (p.from === p.to ? `the day ${p.from}` : `${p.from} to ${p.to}`) : p.days === 1 ? latest : p.days ? `the last ${p.days} days` : '';
+  if (both) return `${page}${period ? `, showing ${period}` : ''}`;
   const view = { nonfiltered: 'Non-filtered', all: 'All' }[context.view] ?? 'Filtered';
   return `${page}${period ? `, showing ${period}` : ''}, ${view} view`;
 }
@@ -48,6 +55,7 @@ They are on ${describePage(context)}. "This course", "these jobs", "here" mean t
 How the dashboard counts:
 - "New jobs" in a period = jobs our collector first found on those days (India time). "Latest day" = the day of the latest collection run.
 - Filtered (the default) = kept jobs: ${experienceRangeText()} years of experience, not from big IT services firms. Non-filtered = jobs those rules leave out (e.g. fresher jobs${config.experience.max ? `, jobs asking for more than ${config.experience.max} years` : ''}), and jobs found only by the extra searches (${COURSES.flatMap((c) => c.extraSearchTerms ?? []).join(', ')}). All = both together (each job is in one of the two, so All = Filtered + Non-filtered).
+- Jobs on the site "${TEAM_PLATFORM}" were added by hand by the staff (openings the collector missed); they count like any other job.
 - A period is compared with the same number of days just before only when collection ran on every one of those days.
 - HR details of a job: HR names, HR profile links, phone numbers, emails (typed in by the team, or found in the job post), the students it is assigned to, and notes.
 - Same company: a job from a company we found jobs from on earlier days is tagged "Hiring again"; a job with no HR contact shows the HR saved on another of the company's jobs, and "Use this HR" copies it (the same number may be on several jobs of one company, never on another company's). Copied numbers are not new contacts.

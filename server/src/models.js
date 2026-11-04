@@ -55,6 +55,13 @@ const jobSchema = new mongoose.Schema(
     // NonFilteredJob only: one of a course's extra searches (extraSearchTerms) found it, and no main search
     // kept it (else it would be a kept job). Such a job that passes the keep rules has leftOutBy 'extra-search'.
     fromExtraSearch: Boolean,
+    // A job a staff member added by hand on the dashboard (an opening the collector missed: src/addedJobs.js),
+    // on the site "Added by team". Absent = found by the collector. Such a job is never removed by the cleanup or
+    // by reclassify, and its course (the staff's choice) is never changed.
+    addedBy: {
+      type: new mongoose.Schema({ userId: String, email: String, name: String, at: Date }, { _id: false }),
+      default: undefined,
+    },
   },
   { versionKey: false, minimize: false },
 );
@@ -69,6 +76,8 @@ jobSchema.index({ lastSeenAt: 1 });
 // "Is this phone number already on another job?" (api/followUp.js)
 jobSchema.index({ 'manual.phoneKeys': 1 });
 jobSchema.index({ foundPhones: 1 });
+// The jobs the team added by hand (GET /added-jobs, and their links when one is added again): only those.
+jobSchema.index({ 'addedBy.at': -1 }, { partialFilterExpression: { 'addedBy.at': { $exists: true } } });
 
 export const Job = mongoose.model('Job', jobSchema);
 
@@ -202,7 +211,7 @@ const activitySchema = new mongoose.Schema(
       name: String,
       role: String, // their role at the time
     },
-    action: { type: String, required: true }, // added | edited | removed: all the changes together
+    action: { type: String, required: true }, // added | edited | removed: all the changes together (a job added or removed by hand: added | removed)
     via: String, // 'ai': made with IJF AI (confirmed by the person in the chat)
     job: {
       id: { type: mongoose.Schema.Types.ObjectId, required: true },
@@ -217,6 +226,11 @@ const activitySchema = new mongoose.Schema(
       type: new mongoose.Schema({ id: mongoose.Schema.Types.ObjectId, set: String, title: String, company: String }, { _id: false }),
       default: undefined,
     },
+    // The job itself was added by hand (POST /added-jobs): its link, and whether its company was new to the HR
+    // database (no job of it in either set before). The HR contact typed with it is in `changes`, as for any save.
+    newJob: { type: new mongoose.Schema({ url: String, newCompany: Boolean }, { _id: false }), default: undefined },
+    // A job added by hand was removed again (DELETE /added-jobs/:id): its link.
+    removedJob: { type: new mongoose.Schema({ url: String }, { _id: false }), default: undefined },
   },
   { versionKey: false },
 );

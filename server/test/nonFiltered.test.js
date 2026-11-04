@@ -3,9 +3,12 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import { MongoMemoryServer } from 'mongodb-memory-server-core';
+import mongoose from 'mongoose';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { collect, perSearch } from '../src/collector/collect.js';
 import { CollectorRun, Job, NonFilteredJob } from '../src/models.js';
+import { addedJobDoc, parseAddedJobInput, TEAM_PLATFORM } from '../src/addedJobs.js';
+import { addedJobReason } from '../src/config/filters.js';
 
 let mongo;
 before(async () => {
@@ -243,4 +246,111 @@ test('reclassify keeps a job only the extra searches found as non-filtered', asy
   assert.deepEqual((await NonFilteredJob.find().lean()).map((j) => `${j.company} ${j.leftOutBy}`), ['Firm 1 extra-search']);
   const moved = await Job.findOne({ company: 'Firm 2' }).lean();
   assert.ok(moved && moved.leftOutBy === undefined && moved.fromExtraSearch === undefined, 'a kept job has neither');
+});
+
+// ---------- Jobs the team added by hand (src/addedJobs.js) ----------
+
+const STAFF = { userId: 'user_riya', email: 'riya@example.com', name: 'Riya' };
+// A job added by hand, stored in `model` as POST /added-jobs stores it (without its HR contact); extra: fields to change.
+const addedJob = (model, fields, at, extra = {}) => {
+  const { value } = parseAddedJobInput({ title: 'Data Engineer', course: 'data-engineering', ...fields });
+  const leftOutBy = addedJobReason({ company: value.company, experienceMin: value.experience?.min ?? null });
+  return model.create({ ...addedJobDoc(value, { _id: new mongoose.Types.ObjectId(), person: STAFF, now: at, leftOutBy }), ...extra });
+};
+
+test('a collected listing of a job the team added joins it: the job gains the site and keeps what the team gave it', async () => {
+  const at = new Date('2026-10-15T06:00:00Z');
+  const link = 'https://www.naukri.com/job-listings-big-data-engineer-omega-pune-3-to-6-years-123456789012';
+  const mine = await addedJob(Job, { company: 'Omega', title: 'Big Data Engineer', course: 'data-analyst', url: link }, at);
+  assert.deepEqual(mine.sourceKeys, ['Naukri:123456789012'], 'the key the collector gives this listing');
+
+  const done = await run({ Naukri: [naukri('123456789012', 'Data Engineer', 'Omega')] }, new Date('2026-10-16T01:00:00Z'));
+  assert.equal(done.totals.inserted, 0);
+  assert.equal(await Job.countDocuments(), 1, 'one job');
+  const job = await Job.findById(mine._id).lean();
+  assert.deepEqual(job.platforms, [TEAM_PLATFORM, 'Naukri']);
+  assert.deepEqual(job.links, { [TEAM_PLATFORM]: link, Naukri: 'https://www.naukri.com/job-listings-123456789012' });
+  assert.deepEqual(
+    [job.title, job.course, job.primaryPlatform, job.firstSeenAt.toISOString()],
+    ['Big Data Engineer', 'data-analyst', TEAM_PLATFORM, at.toISOString()],
+    "the team's title and course, still counted where it was first added",
+  );
+  assert.deepEqual(job.addedBy, mine.toObject().addedBy);
+  assert.equal(job.experienceMin, 3, "the listing's experience fills in what the team didn't give");
+});
+
+test('the cleanup never removes a job the team added, however long ago it was last seen', async () => {
+  const at = new Date('2026-10-15T06:00:00Z');
+  const kept = await addedJob(Job, { company: 'Alpha', url: 'https://alpha.in/jobs/1', experience: '3 years' }, at);
+  const left = await addedJob(NonFilteredJob, { company: 'Oracle', url: 'https://oracle.com/jobs/1' }, at);
+  assert.equal(left.leftOutBy, 'big-company');
+  await Job.create({
+    fingerprint: 'old', title: 'Data Engineer', company: 'Beta', course: 'data-engineering', firstSeenAt: at, lastSeenAt: at,
+    primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: ['Naukri:OLD1'],
+  });
+  const done = await run({}, new Date('2027-03-01T01:00:00Z'));
+  assert.equal(done.totals.removedOld, 1, 'only the collected job');
+  assert.deepEqual((await Job.find().lean()).map((j) => String(j._id)), [String(kept._id)]);
+  assert.deepEqual((await NonFilteredJob.find().lean()).map((j) => String(j._id)), [String(left._id)]);
+});
+
+test('a Non-filtered job the team added that turns up as a kept job: both stay, the team\'s job just as they added it', async () => {
+  const at = new Date('2026-10-15T06:00:00Z');
+  const link = 'https://www.naukri.com/job-listings-big-data-engineer-omega-123456789013';
+  const mine = await addedJob(NonFilteredJob, { company: 'Omega', title: 'Big Data Engineer', course: 'data-analyst', url: link, experience: '6+ years' }, at);
+  assert.equal(mine.leftOutBy, 'senior');
+  const done = await run({ Naukri: [naukri('123456789013', 'Data Engineer', 'Omega')] }, new Date('2026-10-16T01:00:00Z'));
+  assert.equal(done.totals.nonFiltered.removedAsKept, 0);
+  // What the team gave the job, and that nothing else changed (lastSeenAt).
+  const asAdded = (d) => [String(d._id), d.title, d.course, d.firstSeenAt.toISOString(), d.lastSeenAt.toISOString(), d.platforms, d.links, d.sourceKeys, d.leftOutBy, d.addedBy];
+  const added = asAdded(mine.toObject());
+  assert.deepEqual(added.slice(1, 8), ['Big Data Engineer', 'data-analyst', at.toISOString(), at.toISOString(), [TEAM_PLATFORM], { [TEAM_PLATFORM]: link }, ['Naukri:123456789013']]);
+  assert.deepEqual((await NonFilteredJob.find().lean()).map(asAdded), [added], "the team's job is not touched: the same id, title, course, date, link and who added it");
+  const kept = await Job.find().lean();
+  assert.equal(kept.length, 1, 'the kept job is saved too');
+  assert.deepEqual([kept[0].title, kept[0].platforms, kept[0].sourceKeys, kept[0].addedBy], ['Data Engineer', ['Naukri'], ['Naukri:123456789013'], undefined]);
+
+  // Collected again: still both, the team's job unchanged.
+  await run({ Naukri: [naukri('123456789013', 'Data Engineer', 'Omega')] }, new Date('2026-10-17T01:00:00Z'));
+  assert.deepEqual((await NonFilteredJob.find().lean()).map(asAdded), [added]);
+  assert.equal(await Job.countDocuments(), 1);
+});
+
+test('two people add the same opening, one in each set: a collection that keeps it removes neither', async () => {
+  const at = new Date('2026-10-15T06:00:00Z');
+  const riya = await addedJob(Job, { company: 'Zeta', url: 'https://careers.zeta.in/jobs/1', location: 'Pune', experience: '3 years' }, at);
+  const byAman = { addedBy: { userId: 'user_aman', email: 'aman@example.com', name: 'Aman', at } };
+  const naukriLink = 'https://www.naukri.com/job-listings-data-engineer-zeta-223456789013';
+  const aman = await addedJob(NonFilteredJob, { company: 'Zeta', url: naukriLink, location: 'Pune', experience: '6+ years' }, at, byAman);
+  assert.deepEqual([aman.leftOutBy, aman.fingerprint], ['senior', riya.fingerprint], 'the same company, title and city');
+  await run({ Naukri: [naukri('223456789013', 'Data Engineer', 'Zeta')] }, new Date('2026-10-16T01:00:00Z'));
+  const [kept] = await Job.find().lean();
+  assert.deepEqual([String(kept._id), kept.addedBy.email, kept.platforms], [String(riya._id), 'riya@example.com', [TEAM_PLATFORM, 'Naukri']], "the listing joined Riya's job");
+  assert.deepEqual((await NonFilteredJob.find().lean()).map((j) => [String(j._id), j.addedBy.email, j.links[TEAM_PLATFORM]]), [[String(aman._id), 'aman@example.com', naukriLink]], "Aman's stays");
+});
+
+test('reclassify keeps the jobs the team added: their course stays, and experience not stated keeps them in Filtered', async () => {
+  const { reclassifyJobs } = await import('../src/reclassify.js');
+  const at = new Date();
+  const plain = await addedJob(Job, { company: 'Firm A', url: 'https://firma.in/1' }, at);
+  const noCourse = await addedJob(Job, { company: 'Firm B', title: 'Office Coordinator', course: 'data-analyst', url: 'https://firmb.in/1', experience: '2-4 years' }, at);
+  const ownCourse = await addedJob(Job, { company: 'Firm C', course: 'production-support', url: 'https://firmc.in/1', experience: '3 years' }, at);
+  const nowBig = await addedJob(Job, { company: 'Firm D', url: 'https://firmd.in/1', experience: '3 years' }, at, { company: 'Infosys' }); // as if the rules changed
+  const legacy = await addedJob(NonFilteredJob, { company: 'Firm E', url: 'https://firme.in/1' }, at, { leftOutBy: 'no-experience' });
+  const collected = await Job.create({
+    fingerprint: 'c1', title: 'Data Engineer', company: 'Firm F', course: 'data-engineering', experienceBand: 'unknown', firstSeenAt: at, lastSeenAt: at,
+    primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: ['Naukri:C1'],
+  });
+
+  const { counts } = await reclassifyJobs();
+  assert.ok(await Job.exists({ _id: plain._id }), 'experience not stated: still Filtered');
+  assert.equal((await Job.findById(noCourse._id).lean())?.course, 'data-analyst', 'its title fits no course, but it is not removed');
+  assert.equal((await Job.findById(ownCourse._id).lean()).course, 'production-support', "the staff's course, not the title's");
+  const moved = await NonFilteredJob.findById(nowBig._id).lean();
+  assert.equal(moved?.leftOutBy, 'big-company');
+  assert.deepEqual(moved.addedBy, nowBig.toObject().addedBy, 'who added it moves with it');
+  const back = await Job.findById(legacy._id).lean();
+  assert.ok(back && back.leftOutBy === undefined && back.addedBy, 'experience not stated: Filtered');
+  assert.equal((await NonFilteredJob.findById(collected._id).lean())?.leftOutBy, 'no-experience', 'a collected job is left out as before');
+  assert.deepEqual([counts.noCourse, counts.courseChanged], [0, 0]);
 });

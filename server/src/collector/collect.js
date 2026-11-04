@@ -402,11 +402,12 @@ function resolveEarlierFailures(summaries, log) {
 // for the dashboard's Non-filtered switch. It runs
 // after the kept jobs are saved, so every kept job of this run is known, and never changes them.
 // Left-out listings are merged among themselves the same way as kept ones, and a listing is never in
-// both sets:
+// both sets (but for the two cases at the end):
 //   - a left-out listing that is the same opening as a kept job is not added (alreadyKept);
 //   - a stored non-filtered job that is the same opening as a kept job of this run is removed
 //     (removedAsKept): the kept job wins. HR details typed into it move to the kept job when that has
-//     none; when both have some, both jobs stay.
+//     none; when both have some, both jobs stay. A job the team added by hand (addedBy) is never removed
+//     this way: it stays as the team added it (its title, course, date, link and id), and so does the kept job.
 async function saveNonFiltered(leftOut, pool, now, log) {
   const others = new JobPool();
   others.backdateFrom = pool.backdateFrom;
@@ -425,7 +426,7 @@ async function saveNonFiltered(leftOut, pool, now, log) {
   const moveManual = [];
   for (const kept of keptThisRun) {
     const twin = others.find(kept, (o) => !o.gone);
-    if (!twin || (twin.manual && kept.manual)) continue;
+    if (!twin || (twin.manual && kept.manual) || twin.addedBy) continue;
     twin.gone = true;
     twin.touched = false;
     if (twin.isNew) continue; // first found by this run: simply not saved
@@ -592,8 +593,8 @@ export async function collect({
       log(`  ✗ Non-filtered jobs: NOT SAVED - ${err.message}. The kept jobs are saved; "npm run replay" can add them later.`);
     }
 
-    // Old jobs are deleted, except ones someone typed HR details into.
-    const old = { lastSeenAt: { $lt: new Date(now.getTime() - config.retentionDays * DAY_MS) }, manual: { $exists: false } };
+    // Old jobs are deleted, except ones someone typed HR details into, and the ones the team added by hand.
+    const old = { lastSeenAt: { $lt: new Date(now.getTime() - config.retentionDays * DAY_MS) }, manual: { $exists: false }, addedBy: { $exists: false } };
     const removed = await Job.deleteMany(old);
     const removedNonFiltered = await NonFilteredJob.deleteMany(old);
     const sum = (key) => summaries.reduce((n, s) => n + (s[key] ?? 0), 0);
