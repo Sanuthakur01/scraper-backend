@@ -13,6 +13,19 @@ const hasDatabaseName = (uri) => {
   }
 };
 
+// Runs connect() for uri. Some networks (VPNs, antivirus, office DNS filters) refuse the SRV lookup that
+// mongodb+srv:// addresses need: then once more with public DNS for that lookup.
+export async function withPublicDnsRetry(uri, connect) {
+  try {
+    return await connect();
+  } catch (err) {
+    if (!uri.startsWith('mongodb+srv://') || !/querySrv|queryTxt/.test(err.message)) throw err;
+    console.warn(`MongoDB address lookup failed on this network (${err.code ?? err.message}); retrying with public DNS.`);
+    dns.setServers(PUBLIC_DNS);
+    return connect();
+  }
+}
+
 export async function connectDb(uri = config.mongoUri) {
   if (!uri) {
     throw new Error(
@@ -24,16 +37,7 @@ export async function connectDb(uri = config.mongoUri) {
     ...(hasDatabaseName(uri) ? {} : { dbName: 'jobdashboard' }),
   };
 
-  try {
-    await mongoose.connect(uri, options);
-  } catch (err) {
-    // Some networks (VPNs, antivirus, office DNS filters) refuse the SRV lookup that
-    // mongodb+srv:// addresses need. Retry once with public DNS for that lookup.
-    if (!uri.startsWith('mongodb+srv://') || !/querySrv|queryTxt/.test(err.message)) throw err;
-    console.warn(`MongoDB address lookup failed on this network (${err.code ?? err.message}); retrying with public DNS.`);
-    dns.setServers(PUBLIC_DNS);
-    await mongoose.connect(uri, options);
-  }
+  await withPublicDnsRetry(uri, () => mongoose.connect(uri, options));
   return mongoose.connection;
 }
 

@@ -121,11 +121,16 @@ test("sign-in check with Clerk's real verifyToken: a valid token gets in, an exp
   assert.equal(await status(sign({ ...claims, azp: 'https://elsewhere.example.com' })), 401, 'from another site');
 });
 
-test('the server knows the same five roles and permissions as the dashboard', () => {
-  for (const role of ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM', 'STUDENT_MANAGEMENT']) {
+test('the server knows the same six roles and permissions as the dashboard', () => {
+  for (const role of ['SUPER_ADMIN', 'ADMIN', 'PLACEMENT_STAFF', 'RESEARCH_TEAM', 'STUDENT_MANAGEMENT', 'PRE_PLACEMENT_STAFF']) {
     assert.equal(roleFrom({ role }), role);
-    assert.ok(can(role, 'view') && can(role, 'edit-hr-details'), role);
+    assert.ok(can(role, 'view') && can(role, 'edit-hr-details') && can(role, 'add-jobs'), role);
   }
+  for (const role of ['PREEPLACEMENT_STAFF', 'PREPLACEMENT_STAFF', 'Pre-placement staff']) {
+    assert.equal(roleFrom({ role }), 'PRE_PLACEMENT_STAFF', role);
+  }
+  assert.equal(roleFrom({ role: 'PRE_PLACEMENT' }), null);
+  assert.equal(can('PRE_PLACEMENT_STAFF', 'view-ai-usage'), false, 'as Placement staff: not the admins\' AI usage');
   assert.equal(roleFrom({ role: 'STUDENT' }), null);
   assert.equal(can(null, 'view'), false);
 });

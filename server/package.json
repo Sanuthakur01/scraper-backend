@@ -10,6 +10,7 @@
     "refresh-skills": "node scripts/refresh-skills.js",
     "replay": "node scripts/replay.js",
     "dedupe": "node scripts/dedupe.js",
+    "sync-interviews": "node scripts/sync-interviews.js",
     "demo": "node scripts/demo.js",
     "test": "node --test"
   },

@@ -86,6 +86,25 @@ test('Interview sheet: rounds grouped for the filter, whatever the spelling; "RE
   );
 });
 
+test('Interview sheet: a header whose COMPANY title is blank (May 2026) still reads the company under it', () => {
+  const MAY = [
+    ['INTERVIEW SCHEDULED REPORT 04/05/2026'],
+    ['IT JOBS FACTORY'],
+    ['S.NO.', 'DATE', 'NAME', 'TIME', '', 'ROUND', 'ROOM'],
+    ['1', '04/05/2026', 'ROHAN DAS', '4:30 PM', 'CONDUENT', 'R-02'],
+    ['2', '04/05/2026', 'SARA KHAN', '1:00 PM', 'KEY COMPUTERS', 'R-03', '', 'PLACED'],
+    ['INTERVIEW SCHEDULED REPORT 05/05/2026'],
+    ['S.NO.', 'DATE', 'NAME', 'TIME', 'COMPANY', 'ROUND', 'ROOM', '', ''], // blank cells after the titles: not the company
+    ['1', '05/05/2026', 'VIJAY RAO', '4:30 PM', 'LAMBDA', 'R-01', '105'],
+  ];
+  assert.deepEqual(
+    parseInterviews('MAY 2026', MAY).map((i) => [i.name, i.company, i.round, i.room, i.status]),
+    [['ROHAN DAS', 'CONDUENT', 'R-02', '', ''], ['SARA KHAN', 'KEY COMPUTERS', 'R-03', '', 'PLACED'], ['VIJAY RAO', 'LAMBDA', 'R-01', '105', '']],
+  );
+  const twoBlanks = parseInterviews('MAY 2026', [['S.NO.', 'DATE', 'NAME', '', '', 'ROUND'], ['1', '04/05/2026', 'ROHAN DAS', '4:30 PM', 'CONDUENT', 'R-02']]);
+  assert.equal(twoBlanks[0].company, '', 'two blank titles: which one is the company is unclear, so none');
+});
+
 test('Interview sheet: older blocks ("IT JOBS FACTORY", "(PS)"), a date typo in a block, courses from the per-course tabs', () => {
   const AUGUST = [
     ['INTERVIEW SCHEDULED REPORT 03/08/2026'],

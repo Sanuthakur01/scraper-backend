@@ -118,6 +118,12 @@ export const config = {
     privateKey: (process.env.GOOGLE_PRIVATE_KEY ?? '').replace(/\\n/g, '\n'),
   },
 
+  // The LMS's main database (its own cluster, not MONGODB_URI): the interview sheet is copied there into one
+  // collection, all_interviews (src/allInterviews.js, `npm run sync-interviews`). Nothing else there is written.
+  lms: {
+    mongoUri: process.env.LMS_MONGO_URI ?? '',
+  },
+
   // IJF AI (the chat, src/ai/): OpenAI, called only from this server, never from the browser. No key:
   // the chat is switched off and the dashboard doesn't show it. dailyLimit: questions per person per
   // IST day (people aren't told the number). model: any OpenAI chat model with tool calling.

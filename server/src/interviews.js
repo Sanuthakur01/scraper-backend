@@ -149,6 +149,11 @@ export function parseInterviews(title, rows) {
     if (keys.includes('date') && keys.includes('name')) {
       cols = {};
       keys.forEach((key, i) => key && cols[key] === undefined && (cols[key] = i));
+      // A header without COMPANY but with one blank title among the others ("S.NO. | DATE | NAME | TIME |  | ROUND |
+      // ROOM": some May 2026 blocks, the company names written under it): that column is the company.
+      const [first, last] = [Math.min(...Object.values(cols)), Math.max(...Object.values(cols))];
+      const blank = cells.map((c, i) => (!c && i > first && i < last ? i : -1)).filter((i) => i >= 0);
+      if (cols.company === undefined && blank.length === 1) cols.company = blank[0];
       return;
     }
     if (!cols) return;
@@ -249,7 +254,9 @@ export function createInterviewSource({ sheetId, serviceAccount, privateKey }, {
     const rowsOf = (title) => values.valueRanges[read.indexOf(title)]?.values ?? [];
     const courseItems = courseTabs.flatMap((title) => parseInterviews(title, rowsOf(title)).map((i) => ({ ...i, course: courseOfTab(title) })));
     const items = labelCourses(tabs.flatMap((title) => parseInterviews(title, rowsOf(title))), courseItems);
-    return { items, tabs, readAt: new Date(now()).toISOString(), error: null };
+    // courseItems: the per-course tabs' own rows (most are the month tabs' interviews again), for the LMS copy
+    // (src/allInterviews.js), which also keeps the ones only listed there.
+    return { items, courseItems, tabs, readAt: new Date(now()).toISOString(), error: null };
   }
 
   return {

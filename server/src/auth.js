@@ -80,7 +80,11 @@ export function createClerkIdentify({ secretKey, authorizedParties = [], verify 
 }
 
 // What a role without the permission is told (any other permission: "Your role can't see this.").
-const REFUSALS = { 'edit-hr-details': "Your role can't change HR details.", 'add-jobs': "Your role can't add jobs." };
+const REFUSALS = {
+  'edit-hr-details': "Your role can't change HR details.",
+  'add-jobs': "Your role can't add jobs.",
+  'manage-interviews': "Your role can't add or change interviews.",
+};
 
 // Express middleware: only a signed-in person whose role has `permission` gets through; they are on
 // req.person afterwards. identify comes from app.locals (see createApp).

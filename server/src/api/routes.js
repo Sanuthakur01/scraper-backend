@@ -20,6 +20,7 @@ import { searchEverything } from './search.js';
 import { AllJobs } from './allJobs.js';
 import { ROLE_BOXES, roleTitleQuery } from '../config/roleBoxes.js';
 import { missingSettings } from '../interviews.js';
+import { dashboardItem, dayOrder, IN_USE } from '../lmsInterviews.js';
 import { callView, HOT_DAYS, hotCompanies, parseCallChange, parseCallInput, portalKeys } from '../incomingCalls.js';
 
 const router = express.Router();
@@ -1178,9 +1179,25 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
 // today (as in the Performance report; ?days= or ?from=&to=): the latest day first, each day by time ("ANYTIME"
 // last). The sheet is read at most every 10 minutes; readAt says when. A reading that failed after a good one
 // keeps the good one's interviews and says why (error); with none to show, 503. Signed-in people only.
+// With the LMS database connected (LMS_MONGO_URI), the interviews come from its all_interviews instead (the LMS's
+// "Today's Interviews", src/lmsInterviews.js): always current (readAt: now), source 'lms'.
 router.get('/interviews', requirePermission('view'), wrap(async (req, res) => {
   const range = activityRange(req.query);
   const period = { days: range.days, from: range.from, to: range.to };
+  const byDayAndTime = (a, b) => b.date.localeCompare(a.date) || (a.minutes ?? 1e9) - (b.minutes ?? 1e9) || a.id.localeCompare(b.id, 'en', { numeric: true });
+  if (req.app.locals.lms) {
+    let docs;
+    try {
+      const col = await req.app.locals.lms.collection();
+      docs = await col.find({ date: { $gte: range.from, $lte: range.to }, ...IN_USE }).toArray();
+    } catch (err) {
+      console.error(`LMS database: ${err.message}`);
+      return res.status(503).json({ error: 'Could not read the interviews from the LMS database. Try again in a minute.' });
+    }
+    // Each day by time; the same time (or none) in the sheet's order (dayOrder: by course, then as entered).
+    const items = docs.sort(dayOrder).map(dashboardItem).sort((x, y) => y.date.localeCompare(x.date) || (x.minutes ?? 1e9) - (y.minutes ?? 1e9));
+    return res.json({ ...period, configured: true, source: 'lms', items, readAt: new Date().toISOString(), error: null });
+  }
   const source = req.app.locals.interviews;
   // Not set up: which settings this server is missing (names only) and when it started, so whoever set them can
   // tell a typo from a server not restarted since.
@@ -1189,10 +1206,8 @@ router.get('/interviews', requirePermission('view'), wrap(async (req, res) => {
   }
   const sheet = await source.read();
   if (sheet.error && !sheet.readAt) return res.status(503).json({ error: `Could not read the interview sheet. ${sheet.error}` });
-  const items = sheet.items
-    .filter((item) => item.date >= range.from && item.date <= range.to)
-    .sort((a, b) => b.date.localeCompare(a.date) || (a.minutes ?? 1e9) - (b.minutes ?? 1e9) || a.id.localeCompare(b.id, 'en', { numeric: true }));
-  res.json({ ...period, configured: true, items, readAt: sheet.readAt, error: sheet.error });
+  const items = sheet.items.filter((item) => item.date >= range.from && item.date <= range.to).sort(byDayAndTime);
+  res.json({ ...period, configured: true, source: 'sheet', items, readAt: sheet.readAt, error: sheet.error });
 }));
 
 // ---------- Incoming calls ----------

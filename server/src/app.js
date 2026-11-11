@@ -8,6 +8,7 @@ import { createClerkIdentify } from './auth.js';
 import { createOpenAi } from './ai/openai.js';
 import aiRoutes from './ai/routes.js';
 import { createInterviewSource } from './interviews.js';
+import lmsInterviewRoutes from './api/lmsInterviews.js';
 
 // Optional login: any username, the password from DASHBOARD_PASSWORD.
 function basicAuth(password) {
@@ -43,17 +44,21 @@ function allowOrigins(origins) {
 }
 
 // identify: who sent a request (src/auth.js); by default checked with Clerk. Tests pass their own (and their own
-// interview sheet).
+// interview sheet and LMS database).
 export function createApp({
   identify = createClerkIdentify(config.clerk),
   ai = config.ai.apiKey ? createOpenAi(config.ai) : null,
   interviews = createInterviewSource(config.interviews),
+  lms = null, // src/server.js passes the real one (createLmsStore); tests their own or none
 } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.locals.identify = identify;
   app.locals.ai = ai; // IJF AI's model call (src/ai/openai.js), null when OPEN_AI_API_KEY isn't set
   app.locals.interviews = interviews; // the staff's interview sheet (src/interviews.js), null when not set up
+  // The LMS database's all_interviews (src/lmsInterviews.js), null when LMS_MONGO_URI isn't set. When set, it is
+  // where interviews come from (the LMS's "Today's Interviews"), not the sheet.
+  app.locals.lms = lms;
 
   // Before the login check, which a browser's preflight request can't pass.
   if (config.corsOrigins.length) app.use('/api', allowOrigins(config.corsOrigins));
@@ -64,6 +69,7 @@ export function createApp({
   if (config.dashboardPassword) app.use(basicAuth(config.dashboardPassword));
 
   app.use('/api', aiRoutes);
+  app.use('/api', lmsInterviewRoutes);
   app.use('/api', apiRoutes);
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
