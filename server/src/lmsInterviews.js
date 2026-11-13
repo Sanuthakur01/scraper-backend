@@ -56,6 +56,18 @@ export function parseInterviewInput(body, { partial = false } = {}) {
     value[field] = text;
   }
   if (value.studentName !== undefined && !value.studentName) return { error: "Write the student's name." };
+  // Who the name refers to in the LMS. Named studentClerkId, not clerkId,
+  // because createdBy.userId on the same document is the *staff member's*
+  // Clerk id — one bare "clerkId" here would be read as the wrong person.
+  // Optional: interviews backfilled from the sheet have no student attached,
+  // and editing one of those must not demand that someone find them first.
+  if (!partial || has('studentClerkId')) {
+    const clerkId = String(input.studentClerkId ?? '').trim();
+    if (clerkId && !/^user_[A-Za-z0-9]{8,64}$/.test(clerkId)) {
+      return { error: 'Pick the student from the list so the interview is linked to them.' };
+    }
+    value.studentClerkId = clerkId || null;
+  }
   if (value.company !== undefined && !value.company) return { error: 'Write the company.' };
   if (!partial || has('status')) {
     const status = clean(input.status);
@@ -133,6 +145,7 @@ export function interviewView(doc) {
     course: doc.course ?? null,
     courseName: doc.courseName ?? COURSE_NAMES.get(doc.course) ?? null,
     studentName: doc.studentName,
+    studentClerkId: doc.studentClerkId ?? null,
     time: doc.time ?? '',
     minutes: doc.minutes ?? null,
     company: doc.company ?? '',
@@ -177,15 +190,18 @@ export function dashboardItem(doc) {
 export function createLmsStore(uri) {
   if (!uri) return null;
   let pending = null;
+  const connected = () => {
+    pending ??= connectLms(uri).catch((err) => {
+      pending = null;
+      throw err;
+    });
+    return pending;
+  };
   return {
-    collection() {
-      pending ??= connectLms(uri)
-        .then((lms) => lms.collection)
-        .catch((err) => {
-          pending = null;
-          throw err;
-        });
-      return pending;
-    },
+    collection: () => connected().then((lms) => lms.collection),
+    // The LMS database itself, so the interview page's name picker can read the
+    // LMS's own users and courses (src/lmsStudents.js). Reading only: this
+    // server still writes nothing outside all_interviews.
+    db: () => connected().then((lms) => lms.db),
   };
 }

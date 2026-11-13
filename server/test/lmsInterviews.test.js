@@ -57,7 +57,12 @@ const call = async (method, path, body) => {
 const ENTRY = { date: today, course: 'data-analyst', studentName: '  aman   gupta ', time: '2:30 pm', company: 'Gamma Media', round: 'r-1', room: '105', status: '' };
 
 test('input: what a new interview needs, and what a change may send', () => {
-  assert.deepEqual(parseInterviewInput(ENTRY).value, { date: today, course: 'data-analyst', studentName: 'AMAN GUPTA', company: 'GAMMA MEDIA', time: '2:30 PM', round: 'R-1', room: '105', status: '' });
+  // studentClerkId: who the name is in the LMS. null here because this entry doesn't name one;
+  // the add form always does, so the interview is linked rather than matched by spelling.
+  assert.deepEqual(parseInterviewInput(ENTRY).value, { date: today, course: 'data-analyst', studentName: 'AMAN GUPTA', company: 'GAMMA MEDIA', time: '2:30 PM', round: 'R-1', room: '105', studentClerkId: null, status: '' });
+  assert.equal(parseInterviewInput({ ...ENTRY, studentClerkId: 'user_2abcDEF45678' }).value.studentClerkId, 'user_2abcDEF45678');
+  assert.match(parseInterviewInput({ ...ENTRY, studentClerkId: 'not-a-clerk-id' }).error, /Pick the student/);
+  assert.equal(Object.hasOwn(parseInterviewInput({ status: 'cancelled' }, { partial: true }).value, 'studentClerkId'), false);
   assert.equal(parseInterviewInput({ ...ENTRY, course: '' }).error, 'Choose the course.');
   assert.equal(parseInterviewInput({ ...ENTRY, date: '2026-02-30' }).error, 'Choose the day of the interview.');
   assert.equal(parseInterviewInput({ ...ENTRY, studentName: ' ' }).error, "Write the student's name.");

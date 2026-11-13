@@ -18,6 +18,7 @@ import {
   STATUSES,
 } from '../lmsInterviews.js';
 import { COURSES } from '../config/courses.js';
+import { MIN_QUERY, searchStudents } from '../lmsStudents.js';
 
 const router = express.Router();
 const wrap = (handler) => (req, res, next) => handler(req, res).catch(next);
@@ -32,6 +33,22 @@ async function interviewsOf(req, res) {
   }
   try {
     return await store.collection();
+  } catch (err) {
+    console.error(`LMS database: ${err.message}`);
+    res.status(503).json({ error: 'Could not reach the LMS database. Try again in a minute.' });
+    return null;
+  }
+}
+
+// The LMS database itself (its users/courses), for the name picker.
+async function lmsDbOf(req, res) {
+  const store = req.app.locals.lms;
+  if (!store || typeof store.db !== 'function') {
+    res.status(503).json({ error: "The LMS database isn't connected on the HR server (LMS_MONGO_URI)." });
+    return null;
+  }
+  try {
+    return await store.db();
   } catch (err) {
     console.error(`LMS database: ${err.message}`);
     res.status(503).json({ error: 'Could not reach the LMS database. Try again in a minute.' });
@@ -61,6 +78,16 @@ router.get('/lms-interviews', can, wrap(async (req, res) => {
     courses: COURSE_ORDER.map((id) => ({ id, name: COURSES.find((c) => c.id === id)?.name ?? id })),
     statuses: STATUSES,
   });
+}));
+
+// GET /api/lms-interviews/students?q=...: LMS students whose name matches, for the add form's picker. Declared
+// before the /:id routes so "students" is never read as an interview id.
+router.get('/lms-interviews/students', can, wrap(async (req, res) => {
+  const q = String(req.query.q ?? '').trim();
+  if (q.length < MIN_QUERY) return res.json({ query: q, items: [] });
+  const db = await lmsDbOf(req, res);
+  if (!db) return;
+  res.json({ query: q, items: await searchStudents(db, q) });
 }));
 
 // POST /api/lms-interviews: add one. 409 when the same interview is already there.
