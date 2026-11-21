@@ -59,7 +59,7 @@ const ENTRY = { date: today, course: 'data-analyst', studentName: '  aman   gupt
 test('input: what a new interview needs, and what a change may send', () => {
   // studentClerkId: who the name is in the LMS. null here because this entry doesn't name one;
   // the add form always does, so the interview is linked rather than matched by spelling.
-  assert.deepEqual(parseInterviewInput(ENTRY).value, { date: today, course: 'data-analyst', studentName: 'AMAN GUPTA', company: 'GAMMA MEDIA', time: '2:30 PM', round: 'R-1', room: '105', studentClerkId: null, status: '' });
+  assert.deepEqual(parseInterviewInput(ENTRY).value, { date: today, course: 'data-analyst', studentName: 'AMAN GUPTA', company: 'GAMMA MEDIA', time: '2:30 PM', round: 'R-1', room: '105', studentClerkId: null, status: '', estimatedDurationMins: null });
   assert.equal(parseInterviewInput({ ...ENTRY, studentClerkId: 'user_2abcDEF45678' }).value.studentClerkId, 'user_2abcDEF45678');
   assert.match(parseInterviewInput({ ...ENTRY, studentClerkId: 'not-a-clerk-id' }).error, /Pick the student/);
   assert.equal(Object.hasOwn(parseInterviewInput({ status: 'cancelled' }, { partial: true }).value, 'studentClerkId'), false);
@@ -72,6 +72,23 @@ test('input: what a new interview needs, and what a change may send', () => {
   assert.deepEqual(parseInterviewInput({ status: 'cancelled' }, { partial: true }).value, { status: 'CANCELLED' });
   assert.equal(parseInterviewInput({}, { partial: true }).error, 'Nothing to change.');
   assert.equal(parseInterviewInput({ company: '' }, { partial: true }).error, 'Write the company.');
+
+  // How long the interview is expected to take. Optional: thousands of
+  // interviews predate the field, and one added without an estimate is still
+  // a perfectly good interview.
+  assert.equal(parseInterviewInput({ ...ENTRY, estimatedDurationMins: 45 }).value.estimatedDurationMins, 45);
+  assert.equal(parseInterviewInput({ ...ENTRY, estimatedDurationMins: '45' }).value.estimatedDurationMins, 45);
+  for (const blank of [null, undefined, '', '   ']) {
+    assert.equal(parseInterviewInput({ ...ENTRY, estimatedDurationMins: blank }).value.estimatedDurationMins, null, `blank: ${JSON.stringify(blank)}`);
+  }
+  for (const bad of [0, 4, 481, 2.5, 'soon', -30, Number.NaN, Infinity]) {
+    assert.match(parseInterviewInput({ ...ENTRY, estimatedDurationMins: bad }).error, /whole number of minutes/, `bad: ${String(bad)}`);
+  }
+  // On a change it is only touched when sent, so marking one cancelled does
+  // not quietly wipe the estimate.
+  assert.equal(Object.hasOwn(parseInterviewInput({ status: 'cancelled' }, { partial: true }).value, 'estimatedDurationMins'), false);
+  assert.deepEqual(parseInterviewInput({ estimatedDurationMins: 30 }, { partial: true }).value, { estimatedDurationMins: 30 });
+  assert.deepEqual(parseInterviewInput({ estimatedDurationMins: '' }, { partial: true }).value, { estimatedDurationMins: null });
 });
 
 test("today's list: the sheet's interviews in its order, with the courses and statuses to choose from", async () => {

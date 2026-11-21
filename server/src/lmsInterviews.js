@@ -17,6 +17,11 @@ export const STATUSES = ['', 'RESCHEDULED', 'CANCELLED', 'PLACED'];
 export const COURSE_ORDER = ['production-support', 'data-analyst', 'data-science', 'data-engineering'];
 const COURSE_NAMES = new Map(COURSES.map((c) => [c.id, c.name]));
 const LIMITS = { studentName: 80, company: 120, time: 20, round: 60, room: 60 };
+// How long the interview is expected to take, in minutes. Deliberately NOT
+// called `minutes`: that field already exists on these documents and means
+// minutes since midnight, used to sort a day. Two fields a letter apart would
+// be read as each other sooner or later.
+const DURATION = { min: 5, max: 480 };
 const IST_OFFSET_MS = 330 * 60_000;
 
 export const istToday = (now = new Date()) => new Date(now.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
@@ -69,6 +74,21 @@ export function parseInterviewInput(body, { partial = false } = {}) {
     value.studentClerkId = clerkId || null;
   }
   if (value.company !== undefined && !value.company) return { error: 'Write the company.' };
+  // How long it is expected to run. Optional everywhere: the thousands of
+  // interviews already in the collection have no estimate, and an interview
+  // added without one is not worse than no interview at all. Blank clears it.
+  if (!partial || has('estimatedDurationMins')) {
+    const raw = input.estimatedDurationMins;
+    if (raw === null || raw === undefined || String(raw).trim() === '') {
+      value.estimatedDurationMins = null;
+    } else {
+      const mins = Number(raw);
+      if (!Number.isInteger(mins) || mins < DURATION.min || mins > DURATION.max) {
+        return { error: `The expected duration must be a whole number of minutes between ${DURATION.min} and ${DURATION.max}.` };
+      }
+      value.estimatedDurationMins = mins;
+    }
+  }
   if (!partial || has('status')) {
     const status = clean(input.status);
     if (!STATUSES.includes(status)) return { error: 'Choose Scheduled, Rescheduled, Cancelled or Placed.' };
@@ -148,6 +168,9 @@ export function interviewView(doc) {
     studentClerkId: doc.studentClerkId ?? null,
     time: doc.time ?? '',
     minutes: doc.minutes ?? null,
+    // Expected length, in minutes. Null on every interview entered before
+    // this field existed, and on any added without an estimate.
+    estimatedDurationMins: doc.estimatedDurationMins ?? null,
     company: doc.company ?? '',
     round: doc.round ?? '',
     roundGroup: doc.roundGroup ?? '',
@@ -175,6 +198,7 @@ export function dashboardItem(doc) {
     name: v.studentName,
     time: v.time,
     minutes: v.minutes,
+    estimatedDurationMins: v.estimatedDurationMins,
     company: v.company,
     round: v.round,
     roundGroup: v.roundGroup,
