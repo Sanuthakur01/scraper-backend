@@ -12,7 +12,7 @@ export const PHONE_EXISTS = 'This number already exists.';
 // Where the research team found a job's HR contact ("Found by"): needed whenever HR contact details (names,
 // profile links, phones, emails) are added or changed; the dashboard has a dropdown of these.
 // 'incoming-call': the HR called one of our students (logged on the Incoming calls form, src/incomingCalls.js).
-export const HR_SOURCES = { signalhire: 'SignalHire', apollo: 'Apollo', linkedin: 'LinkedIn', naukri: 'Naukri', indeed: 'Indeed', 'incoming-call': 'Incoming call' };
+export const HR_SOURCES = { signalhire: 'SignalHire', apollo: 'Apollo', linkedin: 'LinkedIn', naukri: 'Naukri', indeed: 'Indeed', apify: 'Apify', 'incoming-call': 'Incoming call' };
 export const FOUND_BY_REQUIRED = `Found by: choose where the HR contact was found (${Object.values(HR_SOURCES).join(', ')}).`;
 
 // Phone numbers, email addresses, HR names and HR profile links a job can have typed in (each; the

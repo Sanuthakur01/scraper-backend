@@ -230,8 +230,8 @@ export const TOOLS = [
       job_id: { type: 'string' },
       contact: { type: 'string', description: 'The number or email, as its stand-in, e.g. [phone 2].' },
       student: { type: 'string', description: "The student's name: given the number, or whose call the remark is about ('' with a remark: the number's own, while no student has it)." },
-      take_back: { type: 'boolean', description: 'true: take the number back from this student (their remark goes with it).' },
-      remark: { type: 'string', enum: ['', ...Object.keys(REMARKS)], description: `${Object.entries(REMARKS).map(([id, label]) => `${id} = ${label}`).join('; ')}; '' to clear.` },
+      take_back: { type: 'boolean', description: 'true: take the number back from this student (their remarks go with it).' },
+      remark: { type: 'string', enum: ['', ...Object.keys(REMARKS)], description: `${Object.entries(REMARKS).map(([id, label]) => `${id} = ${label}`).join('; ')}. Added to the call's earlier remarks (they stay; the latest counts); '' clears them all.` },
       note: { type: 'string', description: 'The words of an "other" remark.' },
     },
     ['job_id', 'contact'],
@@ -370,7 +370,14 @@ const RUN = {
         note: job.contact.remarks,
         lastUpdated: job.contact.updatedAt,
       },
-      followUps: outcomes.flatMap((row) => row.outcomes.map((o) => ({ contact: row.value, student: o.student, remark: remarkLabel(row.field, o.status, o.note) }))),
+      followUps: outcomes.flatMap((row) =>
+        row.outcomes.map((o) => ({
+          contact: row.value,
+          student: o.student,
+          remark: remarkLabel(row.field, o.status, o.note), // the latest
+          remarks: (o.history ?? []).map((h) => remarkLabel(row.field, h.status, h.note)), // all, oldest first
+        })),
+      ),
     };
   },
 
@@ -572,7 +579,7 @@ const RUN = {
     const parts = [
       body.remove && `take it back from ${student}`,
       !body.remove && student && !theirs && `give it to ${student}`,
-      'status' in body && (body.status ? `remark "${remarkLabel(field, body.status, parsed.value.note)}"${student && theirs ? ` for ${student}'s call` : ''}` : `clear ${student ? `${student}'s` : 'its'} remark`),
+      'status' in body && (body.status ? `add the remark "${remarkLabel(field, body.status, parsed.value.note)}"${student && theirs ? ` to ${student}'s call` : ''}` : `clear ${student ? `${student}'s` : 'its'} remarks`),
     ].filter(Boolean);
     const summary = `${value} (${job.title}${job.company ? ` at ${job.company}` : ''}): ${parts.join('; ')}`;
     ctx.actions.push({ type: 'set-follow-up', summary, payload: body });

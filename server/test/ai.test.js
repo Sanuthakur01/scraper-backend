@@ -171,7 +171,7 @@ test('a proposed change waits for Confirm; then it is saved like on the dashboar
   ];
   const follow = await ask("Mark Acme's number as CV shared and give it to Kavya Rao");
   const proposal = follow.done.message.actions[0];
-  assert.match(proposal.summary, /^98450 12345 \(Data Analyst 1 at Acme Analytics\): give it to Kavya Rao; remark "CV shared"/);
+  assert.match(proposal.summary, /^98450 12345 \(Data Analyst 1 at Acme Analytics\): give it to Kavya Rao; add the remark "CV shared"/);
   await json(`chat/conversations/${follow.done.chatId}/actions/${proposal.id}`, { method: 'POST', body: JSON.stringify({ decision: 'confirm' }) });
   const outcome = await ContactOutcome.findOne({ job: job1._id }).lean();
   assert.deepEqual([outcome.student, outcome.status], ['Kavya Rao', 'cv-shared']);

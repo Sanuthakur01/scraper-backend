@@ -6,7 +6,7 @@ import { addedJobReason, EXCLUDED_COMPANIES, overExperienceText, underExperience
 import { enabledSources } from '../config/sources.js';
 import { Activity, CollectorRun, ContactOutcome, IncomingCall, Job, NonFilteredJob, STUDENT_COLLATION } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
-import { contactKey, parseOutcomeInput, remarkChange, remarkOf, studentChange } from '../outcomes.js';
+import { contactKey, parseOutcomeInput, remarkChange, remarkHistory, remarkOf, studentChange } from '../outcomes.js';
 import { requirePermission } from '../auth.js';
 import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
@@ -772,7 +772,7 @@ const phoneTaken = (owner, phones) => {
   const where = `"${owner.job.title}"${owner.job.company ? ` at ${owner.job.company}` : ''}`;
   return { status: 409, error: PHONE_EXISTS, detail: `${number} is already saved on ${where}.` };
 };
-async function saveFollowUp(id, value, person, via, { copiedFrom, newJob } = {}) {
+export async function saveFollowUp(id, value, person, via, { copiedFrom, newJob } = {}) {
   const fields = { foundPhones: 1, foundEmails: 1, manual: 1, title: 1, company: 1, course: 1 };
   let model = Job;
   let current = await Job.findById(id, fields).lean();
@@ -951,8 +951,16 @@ router.get('/activity', requirePermission('view'), wrap(async (req, res) => {
 // it can be given out for the new opening). The
 // dashboard groups the rows person → course → company → job. Signed-in people with an allowed role.
 const CONTACT_FIELDS = ['phone', 'email'];
-// One follow-up as the dashboard gets it (student '': a remark made before anyone was given the number).
-const outcomeView = (o) => ({ student: o.student ?? '', status: o.status ?? '', note: o.note ?? '', updatedAt: o.updatedAt ?? null, updatedBy: o.updatedBy ?? null });
+// One follow-up as the dashboard gets it (student '': a remark made before anyone was given the number); status
+// and note are the latest of its remarks (history, oldest first).
+const outcomeView = (o) => ({
+  student: o.student ?? '',
+  status: o.status ?? '',
+  note: o.note ?? '',
+  history: remarkHistory(o).map(({ status, note, at, by }) => ({ status, note: note ?? '', at: at ?? null, by: by ?? null })),
+  updatedAt: o.updatedAt ?? null,
+  updatedBy: o.updatedBy ?? null,
+});
 // The one follow-up a dashboard built before a number could go to several students reads (`outcome`): the first
 // student's, else the number's own remark. Kept until every dashboard reads `outcomes`.
 const firstOutcome = (outcomes) => outcomes.find((o) => o.student) ?? outcomes[0] ?? null;
@@ -1153,7 +1161,7 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
           note: call.feedback.note,
           hours: call.feedback.givenAt ? (call.feedback.at - call.feedback.givenAt) / 3_600_000 : null,
         },
-        now: o ? { student: o.student ?? '', status: o.status ?? '', note: o.note ?? '' } : null,
+        now: o ? { student: o.student ?? '', status: o.status ?? '', note: o.note ?? '', history: outcomeView(o).history } : null,
       };
     };
     const calls = [...contact.calls.values()].filter((call) => (call.given && inPeriod(call.given.at)) || call.feedback);
@@ -1582,7 +1590,9 @@ router.put('/outcomes', requirePermission('record-outcomes'), express.json({ lim
 
   // Recorded with the student's name as it is stored (as first given), whatever case it was sent in.
   const name = mine?.student ?? student;
-  const changes = [...studentChange(field, value, before, after), ...remarkChange(field, value, name, was, next)];
+  // A remark sent is always a change (added to the ones before, even the same one again); taken back, the
+  // student's remarks go.
+  const changes = [...studentChange(field, value, before, after), ...(remarking || remove ? remarkChange(field, value, name, was, next) : [])];
   const added = nextStudents.filter((s) => !students.includes(s));
   const removed = students.filter((s) => !nextStudents.includes(s));
   if (added.length || removed.length) {
@@ -1606,24 +1616,33 @@ router.put('/outcomes', requirePermission('record-outcomes'), express.json({ lim
   });
   try {
     // Only what was sent is written (the student, or the remark), so a student and a remark saved at the same
-    // moment don't undo each other.
-    const set = { value, updatedAt: now, updatedBy: { email: req.person.email, name: req.person.name ?? '' }, ...(remarking ? { status: next.status, note: next.note } : {}) };
+    // moment don't undo each other. A remark is added to the call's remarks ($push: two saved at once both stay);
+    // a record from before remarks were kept first gets its one remark as the first of them, while its
+    // updatedAt/updatedBy still say when it was made and by whom (any save below changes them).
+    const by = { email: req.person.email, name: req.person.name ?? '' };
+    const set = { value, updatedAt: now, updatedBy: by, ...(remarking ? { status: next.status, note: next.note } : {}) };
+    const remark = remarking && next.status ? { status: next.status, note: next.note, at: now, by } : null;
+    const clearing = remarking && !next.status;
+    const update = remark ? { $set: set, $push: { history: remark } } : clearing ? { $set: set, $unset: { history: 1 } } : { $set: set };
+    if (kept?.status && !kept.history?.length && !remove && !clearing) {
+      await ContactOutcome.updateOne({ _id: kept._id, history: { $exists: false } }, { $set: { history: remarkHistory(kept) } });
+    }
     if (remove) {
       if (mine) await ContactOutcome.deleteOne({ _id: mine._id });
     } else if (takeOver) {
-      await ContactOutcome.updateOne({ _id: takeOver._id }, { $set: { ...set, student } });
+      await ContactOutcome.updateOne({ _id: takeOver._id }, { ...update, $set: { ...update.$set, student } });
     } else if (student) {
       // The student's follow-up, made if they have none: the unique index (one per number and student, in any
       // case) keeps the same student sent twice at once to one; the save that lost the race updates it.
       const filter = { job: job._id, field, key, student: name };
-      const save = (upsert) => ContactOutcome.updateOne(filter, { $set: set }, { upsert, collation: STUDENT_COLLATION });
+      const save = (upsert) => ContactOutcome.updateOne(filter, update, { upsert, collation: STUDENT_COLLATION });
       await save(true).catch((err) => (err.code === 11000 ? save(false) : Promise.reject(err)));
     } else if (loose) {
       // The number's own remark (no student has it): cleared, nothing is left of it.
-      if (next.status) await ContactOutcome.updateOne({ _id: loose._id }, { $set: set });
+      if (next.status) await ContactOutcome.updateOne({ _id: loose._id }, update);
       else await ContactOutcome.deleteOne({ _id: loose._id });
     } else if (next.status) {
-      await ContactOutcome.create({ job: job._id, field, key, student: '', ...set });
+      await ContactOutcome.create({ job: job._id, field, key, student: '', ...set, history: [remark] });
     }
     // The job's list: one name added or taken off at a time (not the whole list written back), then the job's
     // typed-in details removed if nothing at all is left in them.

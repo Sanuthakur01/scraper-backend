@@ -47,10 +47,10 @@ export function remarkOf(label) {
 // Checks one change to a number's or email's follow-up, from the performance report or the Assign page:
 //   { job, field: 'phone' | 'email', value, student, add: true }     give it to the student
 //   { job, field, value, student, remove: true }                     take it back (their remark goes with it)
-//   { job, field, value, student, status, note? }                    the remark of the student's call ('' clears
-//                                                                     it), giving it to them first if need be;
-//                                                                     student '': the number's own remark while
-//                                                                     no student has it
+//   { job, field, value, student, status, note? }                    a remark on the student's call, added to the
+//                                                                     ones before ('' clears them all), giving it
+//                                                                     to them first if need be; student '': the
+//                                                                     number's own remark while no student has it
 // A number can go to several students, each with a remark of their own. As the report sent before that: a
 // student alone is "give", and a remark without a student is the only student's (studentSent: false).
 // Returns { value: { job, field, value, key, student, studentSent, add?, remove?, status?, note? } } or { error }.
@@ -95,9 +95,19 @@ export function studentChange(field, value, before, after) {
   return [{ field: 'contactStudent', change, before, after, added, removed, contact: { field, value } }];
 }
 
+// A remark recorded is added to the call's remarks (the ones before it stay), so it is always a change, even the
+// same remark again (a second DNP after calling back): change 'added', the remark in `added`, and before → after
+// the latest remark. Clearing (status '': only as the report did before remarks were kept; the AI can still ask
+// for it) removes them all.
 export function remarkChange(field, value, student, was, next) {
   const [before, after] = [remarkLabel(field, was.status, was.note), remarkLabel(field, next.status, next.note)];
-  if (before === after) return [];
-  const change = !before ? 'added' : !after ? 'removed' : 'edited';
-  return [{ field: 'contactRemark', change, before: before ? [before] : [], after: after ? [after] : [], added: [], removed: [], contact: { field, value, student } }];
+  if (before === after && !after) return [];
+  const contact = { field, value, student };
+  if (after) return [{ field: 'contactRemark', change: 'added', before: before ? [before] : [], after: [after], added: [after], removed: [], contact }];
+  return [{ field: 'contactRemark', change: 'removed', before: [before], after: [], added: [], removed: [], contact }];
 }
+
+// A call's remarks, oldest first: the stored list, or for a record from before remarks were kept, its one remark
+// (when it was last changed, by whom).
+export const remarkHistory = (o) =>
+  o.history?.length ? o.history : o.status ? [{ status: o.status, note: o.note ?? '', at: o.updatedAt ?? null, by: o.updatedBy ?? null }] : [];

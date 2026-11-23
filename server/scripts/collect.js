@@ -8,6 +8,8 @@
 // --course ID[,ID]: search for these courses only, e.g. `--course production-support`.
 // --limit N, or --limit Naukri=3000,Glassdoor=300: results per search for this run (all platforms, or these).
 // A one-course catch-up: `npm run collect -- --days 30 --course production-support --limit Naukri=3000,Glassdoor=300`
+// After the collection, the new Naukri jobs' full pages are read for the contact details written in them
+// (src/collector/naukriDetails.js; NAUKRI_DETAILS=0 skips this).
 import { config } from '../src/config.js';
 import { searchesOf } from '../src/config/courses.js';
 import { experienceRangeText } from '../src/config/filters.js';
@@ -15,6 +17,7 @@ import { enabledSources } from '../src/config/sources.js';
 import { connectDb, disconnectDb } from '../src/db.js';
 import { collect, coursesFor, limitFor, perSearch, stopActiveRun } from '../src/collector/collect.js';
 import { apifyCost, checkApifyCredit, createApifyFetcher } from '../src/collector/apify.js';
+import { createDetailsFetcher, enrichNaukriDetails } from '../src/collector/naukriDetails.js';
 import { createScraperFeedFetcher, stopScrapers } from '../src/collector/scraperFeed.js';
 
 // Ctrl+C or closing the window: close the scraper browsers and release the lock before exiting, so
@@ -159,6 +162,22 @@ try {
   );
   if (run.status !== 'success') console.log('  Some searches failed or were not saved; see the lines above. The other results are saved.');
   if (run.status === 'failed') process.exitCode = 1;
+
+  // Then the new Naukri jobs' full pages, for the contact details recruiters write at the end of a description.
+  // The collection is saved already; a problem here only means those pages are read next run.
+  if (config.naukriDetails.enabled && !stopping) {
+    console.log('');
+    try {
+      await enrichNaukriDetails({
+        fetchDetails: createDetailsFetcher({ ...config.scraper, delaySeconds: config.naukriDetails.delaySeconds }),
+        limit: config.naukriDetails.limit,
+        days: config.naukriDetails.days,
+        runId: run._id,
+      });
+    } catch (err) {
+      console.log(`  Naukri job pages not read: ${err.message} (the collection itself is saved; the next run reads them).`);
+    }
+  }
 } catch (err) {
   console.error(`\nCollection stopped: ${err.message}`);
   process.exitCode = 1;

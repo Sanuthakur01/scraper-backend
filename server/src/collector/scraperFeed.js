@@ -4,6 +4,8 @@
 //   {"keyword": "data analyst", "status": "ok", "items": [...]}  or  {"keyword": ..., "status": "error", "error": ...}
 // Each platform runs as its own Python process with its own browser, so one can't break another.
 // Searches that fail are retried once, in a fresh process.
+// After a collection, naukri_details.py reads the new Naukri jobs' full pages the same way (runPython with the
+// jobs on stdin; see collector/naukriDetails.js).
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,14 +28,15 @@ export function stopScrapers() {
 export const defaultPython = (dir) =>
   path.join(dir, '.venv', process.platform === 'win32' ? 'Scripts\\python.exe' : 'bin/python');
 
-// stdout of a feed script -> Map(keyword -> { status, items, error })
-export function parseFeedOutput(stdout) {
+// stdout of a scraper script -> Map(line[key] -> the line's JSON): one JSON object per line, keyed by `key`.
+// Anything else (a stray print, a partial line from a killed process) is ignored.
+export function parseJsonLines(stdout, key) {
   const results = new Map();
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.startsWith('{')) continue;
     try {
       const result = JSON.parse(line);
-      if (result.keyword) results.set(result.keyword, result);
+      if (result[key] != null && result[key] !== '') results.set(String(result[key]), result);
     } catch {
       // A partial line from a killed process: ignore it.
     }
@@ -41,7 +44,12 @@ export function parseFeedOutput(stdout) {
   return results;
 }
 
-function runPython(python, args, { cwd, timeoutMs, onLog, label }) {
+// stdout of a feed script -> Map(keyword -> { status, items, error })
+export const parseFeedOutput = (stdout) => parseJsonLines(stdout, 'keyword');
+
+// Runs one scraper script to the end (or to timeoutMs) -> { code, stdout, problem }. input: text for its stdin.
+// stderr lines go to onLog as they come; results printed before a timeout or crash are kept in stdout.
+export function runPython(python, args, { cwd, input = null, timeoutMs, onLog, label }) {
   return new Promise((resolve) => {
     const child = spawn(python, args, {
       cwd,
@@ -49,6 +57,10 @@ function runPython(python, args, { cwd, timeoutMs, onLog, label }) {
       windowsHide: true,
     });
     running.add(child);
+    if (input != null) {
+      child.stdin.on('error', () => {}); // the script stopped before reading it all: its exit code says so
+      child.stdin.end(input);
+    }
     let stdout = '';
     let stderrTail = '';
     let problem = '';

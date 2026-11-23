@@ -6,6 +6,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "collect": "node scripts/collect.js",
+    "naukri-details": "node scripts/naukri-details.js",
     "reclassify": "node scripts/reclassify.js",
     "refresh-skills": "node scripts/refresh-skills.js",
     "replay": "node scripts/replay.js",

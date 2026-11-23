@@ -24,9 +24,17 @@ const jobSchema = new mongoose.Schema(
     platforms: [String],
     links: mongoose.Schema.Types.Mixed, // { LinkedIn: url, Naukri: url, ... }
     sourceKeys: [String], // "Naukri:120526025748": every platform listing merged into this job
-    // Contact details written in the postings themselves. Only the collector changes these.
+    // Contact details written in the postings themselves. Only the collector changes these: from the search
+    // results when the job is found, and from the full Naukri page afterwards (collector/naukriDetails.js).
     foundPhones: [String], // "+91 98765 43210"
     foundEmails: [String],
+    // Naukri jobs: the posting's full page was read for contact details (collector/naukriDetails.js): when, and
+    // status 'ok' or 'gone' (the posting was no longer on Naukri). website: the company's site, when Naukri gives
+    // it. Absent = not read yet (only jobs first seen in the last NAUKRI_DETAILS_DAYS days are read).
+    naukriDetail: {
+      type: new mongoose.Schema({ at: Date, status: String, website: String }, { _id: false }),
+      default: undefined,
+    },
     // HR contact and the students the job is assigned to, typed in on the dashboard (api/followUp.js).
     // Only the dashboard changes this, so a collection never overwrites it, and a job with it is never
     // removed by the cleanup. Shown instead of the found phone/email. Absent = nothing entered.
@@ -36,7 +44,7 @@ const jobSchema = new mongoose.Schema(
         {
           hrNames: { type: [String], default: undefined }, // the HR people's names
           hrProfiles: { type: [String], default: undefined }, // links to their profiles (e.g. LinkedIn)
-          foundBy: String, // where the HR contact was found: signalhire | apollo | linkedin | naukri | indeed | incoming-call (followUp.js HR_SOURCES)
+          foundBy: String, // where the HR contact was found: signalhire | apollo | linkedin | naukri | indeed | apify | incoming-call (followUp.js HR_SOURCES)
           phone: String,
           phoneKeys: { type: [String], default: undefined },
           email: String,
@@ -171,6 +179,15 @@ const collectorRunSchema = new mongoose.Schema(
     },
     nonFilteredError: String, // the non-filtered save failed (the kept jobs are saved regardless)
     error: String,
+    // The Naukri job pages read after this run for contact details (collector/naukriDetails.js): how many were
+    // read, were gone from Naukri, or couldn't be read (tried again next run), and what they gave.
+    naukriDetails: {
+      type: new mongoose.Schema(
+        { candidates: Number, read: Number, gone: Number, failed: Number, jobsWithNewContacts: Number, phones: Number, emails: Number, durationMs: Number },
+        { _id: false },
+      ),
+      default: undefined,
+    },
   },
   { versionKey: false },
 );
@@ -255,6 +272,12 @@ const contactOutcomeSchema = new mongoose.Schema(
     student: String,
     status: String, // dnp | busy | switched-off | wrong | not-person | cv-shared | no-openings | other (outcomes.js REMARKS)
     note: String, // the words of an "Others" remark
+    // Every remark recorded on this call, oldest first (a new one is added, never replacing the ones before);
+    // status and note are the latest. Absent on a record from before 23 Nov 2026: its one remark is status/note.
+    history: {
+      type: [new mongoose.Schema({ status: String, note: String, at: Date, by: { email: String, name: String } }, { _id: false })],
+      default: undefined,
+    },
     updatedAt: Date,
     updatedBy: { email: String, name: String },
   },

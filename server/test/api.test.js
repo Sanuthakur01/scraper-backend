@@ -1134,14 +1134,22 @@ test('follow-up of each number/email: given to several students, each call with 
   res = await put({ ...phone, student: 'aman gupta', status: 'cv-shared' });
   assert.deepEqual(followUps(res), [['Kavya Rao', 'dnp', ''], ['Aman Gupta', 'cv-shared', '']]);
   assert.deepEqual((await latest()).changes.map((c) => [c.field, c.change, c.after, c.contact.student]), [['contactRemark', 'added', ['CV shared'], 'Aman Gupta']]);
-  // "Others" in their own words (which must be typed); the same remark again records nothing.
+  // "Others" in their own words (which must be typed). A new remark is added to the call's earlier ones (they stay;
+  // the latest counts), even the same one again: another call.
   assert.deepEqual((await put({ ...phone, student: 'Kavya Rao', status: 'other', note: '  ' })).body, { error: 'Remark: type what happened (Others).' });
   await put({ ...phone, student: 'Kavya Rao', status: 'other', note: 'Call after 5 pm' });
   entry = await latest();
-  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.before, c.after, c.contact.student]), [['contactRemark', 'edited', ['DNP'], ['Others: Call after 5 pm'], 'Kavya Rao']]);
+  assert.deepEqual(entry.changes.map((c) => [c.field, c.change, c.before, c.after, c.added, c.contact.student]), [
+    ['contactRemark', 'added', ['DNP'], ['Others: Call after 5 pm'], ['Others: Call after 5 pm'], 'Kavya Rao'],
+  ]);
   const count = await Activity.countDocuments();
-  await put({ ...phone, student: 'Kavya Rao', status: 'other', note: 'Call after 5 pm' });
-  assert.equal(await Activity.countDocuments(), count, 'saved as it was: nothing recorded');
+  res = await put({ ...phone, student: 'Kavya Rao', status: 'other', note: 'Call after 5 pm' });
+  assert.equal(await Activity.countDocuments(), count + 1, 'the same remark again: one more, recorded');
+  assert.deepEqual(
+    res.body.outcomes[0].history.map((h) => [h.status, h.note, h.by.email]),
+    [['dnp', '', 'caller@example.com'], ['other', 'Call after 5 pm', 'caller@example.com'], ['other', 'Call after 5 pm', 'caller@example.com']],
+    "Kavya's call: every remark, oldest first",
+  );
 
   // A remark for a student who doesn't have it yet gives it to them first.
   res = await put({ ...phone, student: 'Neha Verma', status: 'busy' });
@@ -1205,6 +1213,73 @@ test('follow-up of each number/email: given to several students, each call with 
   assert.equal((await put({ ...phone, job: '0123456789abcdef01234567', status: 'dnp' })).status, 404);
   assert.equal((await put({ ...phone, status: 'dnp' }, 'expired')).status, 401);
   assert.equal((await put({ ...phone, status: 'dnp' }, 'STUDENT:x@example.com')).status, 403);
+});
+
+test("a call keeps every remark: a new one is added and the ones before stay, also one saved before remarks were kept", async () => {
+  const now = Date.now();
+  const [job] = await Job.create([
+    {
+      fingerprint: 'remark-history', title: 'History Analyst', company: 'Remark Co', course: 'data-analyst', cities: ['Pune'],
+      firstSeenAt: new Date(now - HOUR), lastSeenAt: new Date(now - HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: ['HIST:1'],
+      manual: { phone: '+91 97111 22233', phoneKeys: ['9711122233'], email: 'hr@remark.in', updatedAt: new Date(now - HOUR) },
+    },
+  ]);
+  const put = async (body) => {
+    const res = await fetch(`${base}/outcomes`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer PLACEMENT_STAFF:caller@example.com' }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  };
+  const phone = { job: String(job._id), field: 'phone', value: '+91 97111 22233' };
+  const email = { job: String(job._id), field: 'email', value: 'hr@remark.in' };
+  const historyOf = (o) => o.history.map((h) => [h.status, h.note]);
+  const stored = async (field, student) => ContactOutcome.findOne({ job: job._id, field, student }).lean();
+  try {
+    // A remark saved before remarks were kept (one remark, no list): its first remark, with when and by whom.
+    const old = new Date(now - 2 * 24 * HOUR);
+    await ContactOutcome.create({
+      job: job._id, field: 'phone', key: '9711122233', value: '+91 97111 22233', student: 'Riya Sen', status: 'dnp', note: '',
+      updatedAt: old, updatedBy: { email: 'old@example.com', name: 'Old Caller' },
+    });
+    let res = await put({ ...phone, student: 'Riya Sen', add: true }); // has it: nothing changes, the follow-ups as they are
+    assert.deepEqual(historyOf(res.body.outcomes[0]), [['dnp', '']]);
+
+    // A new remark is added after it; the old one stays as it was.
+    res = await put({ ...phone, student: 'Riya Sen', status: 'cv-shared' });
+    const riya = res.body.outcomes[0];
+    assert.deepEqual([riya.status, historyOf(riya)], ['cv-shared', [['dnp', ''], ['cv-shared', '']]]);
+    assert.deepEqual([riya.history[0].by.email, Date.parse(riya.history[0].at)], ['old@example.com', +old]);
+    assert.equal(riya.history[1].by.email, 'caller@example.com');
+    assert.equal((await stored('phone', 'Riya Sen')).history.length, 2);
+
+    // Two saved at the same moment: both kept.
+    const both = await Promise.all([put({ ...phone, student: 'Riya Sen', status: 'busy' }), put({ ...phone, student: 'Riya Sen', status: 'switched-off' })]);
+    assert.deepEqual(both.map((r) => r.status), [200, 200]);
+    assert.deepEqual((await stored('phone', 'Riya Sen')).history.slice(2).map((h) => h.status).sort(), ['busy', 'switched-off']);
+
+    // The number's own remarks, made before anyone had it, go to the first student given it, then theirs after.
+    await put({ ...email, student: '', status: 'wrong' });
+    res = await put({ ...email, student: '', status: 'other', note: 'Bounced twice' });
+    assert.deepEqual(historyOf(res.body.outcomes[0]), [['wrong', ''], ['other', 'Bounced twice']]);
+    await put({ ...email, student: 'Dev Patel', add: true });
+    res = await put({ ...email, student: 'Dev Patel', status: 'no-openings' });
+    assert.deepEqual(res.body.outcomes.map((o) => [o.student, o.status, historyOf(o)]), [
+      ['Dev Patel', 'no-openings', [['wrong', ''], ['other', 'Bounced twice'], ['no-openings', '']]],
+    ]);
+
+    // The review board: the call's feedback is its latest remark, and all its remarks come with it.
+    const review = await (await fetch(`${base}/review?days=1`)).json();
+    const row = review.rows.find((r) => r.value === 'hr@remark.in' && r.student === 'Dev Patel');
+    assert.equal(row.feedback.status, 'no-openings');
+    assert.deepEqual(row.now.history.map((h) => h.status), ['wrong', 'other', 'no-openings']);
+
+    // Clearing (as the report did before remarks were kept; the AI can still be asked to): none left.
+    res = await put({ ...email, student: 'Dev Patel', status: '' });
+    assert.deepEqual(res.body.outcomes.map((o) => [o.status, o.history]), [['', []]]);
+    assert.equal((await stored('email', 'Dev Patel')).history, undefined);
+  } finally {
+    await ContactOutcome.deleteMany({ job: job._id });
+    await Activity.deleteMany({ 'job.id': job._id });
+    await Job.deleteOne({ _id: job._id });
+  }
 });
 
 test('saved at the same moment: a student and their remark are both kept; two students both get the number', async () => {
@@ -1519,7 +1594,7 @@ test('Found by: needed when HR contact details are added or changed, one of the 
   const put = (body) => fetch(`${base}/jobs/${job._id}/follow-up`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   let res = await put({ phone: ['93456 79001'] });
   assert.equal(res.status, 400);
-  assert.match((await res.json()).error, /^Found by: choose where the HR contact was found \(SignalHire, Apollo, LinkedIn, Naukri, Indeed, Incoming call\)/);
+  assert.match((await res.json()).error, /^Found by: choose where the HR contact was found \(SignalHire, Apollo, LinkedIn, Naukri, Indeed, Apify, Incoming call\)/);
   assert.equal((await Job.findById(job._id).lean()).manual, undefined, 'refused: nothing saved');
   res = await put({ phone: ['93456 79001'], foundBy: 'google' });
   assert.match((await res.json()).error, /^Found by: "google" is not one of SignalHire, Apollo, LinkedIn, Naukri, Indeed/);

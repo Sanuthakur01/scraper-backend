@@ -24,6 +24,10 @@ const int = (value, fallback) => {
   const n = Number.parseInt(value, 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
+const seconds = (value, fallback) => {
+  const n = Number(value);
+  return value != null && value !== '' && Number.isFinite(n) && n >= 0 ? n : fallback;
+};
 
 export const config = {
   rootDir,
@@ -76,6 +80,17 @@ export const config = {
       Naukri: int(process.env.NAUKRI_LIMIT_PER_SEARCH, 200),
       Glassdoor: int(process.env.GLASSDOOR_LIMIT_PER_SEARCH, 100),
     },
+  },
+
+  // After each collection, the new Naukri jobs' full pages are read for the contact details written in them
+  // (collector/naukriDetails.js, scraper_file/naukri_details.py): up to `limit` pages a run (kept jobs first,
+  // newest first), for jobs first seen in the last `days` days, pausing `delaySeconds` between pages.
+  // NAUKRI_DETAILS=0 switches it off. `npm run naukri-details` runs it on its own (e.g. for a backlog).
+  naukriDetails: {
+    enabled: process.env.NAUKRI_DETAILS !== '0',
+    limit: int(process.env.NAUKRI_DETAILS_LIMIT, 400),
+    days: int(process.env.NAUKRI_DETAILS_DAYS, 7),
+    delaySeconds: seconds(process.env.NAUKRI_DETAILS_DELAY, 1.5),
   },
 
   // Raw results are stored before database persistence.
