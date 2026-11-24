@@ -67,7 +67,7 @@ test('input: what a new interview needs, and what a change may send', () => {
   assert.equal(parseInterviewInput({ ...ENTRY, date: '2026-02-30' }).error, 'Choose the day of the interview.');
   assert.equal(parseInterviewInput({ ...ENTRY, studentName: ' ' }).error, "Write the student's name.");
   assert.equal(parseInterviewInput({ ...ENTRY, company: '' }).error, 'Write the company.');
-  assert.equal(parseInterviewInput({ ...ENTRY, status: 'DONE' }).error, 'Choose Scheduled, Rescheduled, Cancelled or Placed.');
+  assert.equal(parseInterviewInput({ ...ENTRY, status: 'DONE' }).error, 'Choose Scheduled, Rescheduled, Cancelled, Placed or Completed.');
   assert.match(parseInterviewInput({ ...ENTRY, studentName: 'A'.repeat(81) }).error, /too long/);
   assert.deepEqual(parseInterviewInput({ status: 'cancelled' }, { partial: true }).value, { status: 'CANCELLED' });
   assert.equal(parseInterviewInput({}, { partial: true }).error, 'Nothing to change.');
@@ -100,7 +100,7 @@ test("today's list: the sheet's interviews in its order, with the courses and st
     ['NEHA SINGH', 'production-support', 'sheet', 'CANCELLED', true, 5],
   ]);
   assert.deepEqual(body.courses.map((c) => c.id), ['production-support', 'data-analyst', 'data-science', 'data-engineering']);
-  assert.deepEqual(body.statuses, ['', 'RESCHEDULED', 'CANCELLED', 'PLACED']);
+  assert.deepEqual(body.statuses, ['', 'RESCHEDULED', 'CANCELLED', 'PLACED', 'COMPLETED']);
   assert.deepEqual((await call('GET', '/lms-interviews?date=2020-01-01')).body.items, []);
 });
 
@@ -130,7 +130,7 @@ test('add: saved as written in the sheet (capitals), with who added it; the same
   assert.deepEqual(list.map((i) => i.studentName), ['RAVI KUMAR', 'NEHA SINGH', 'AMAN GUPTA', 'AMAN GUPTA', 'AMAN GUPTA'], 'PS block first, then DA as added');
 });
 
-test('change: mark rescheduled, cancelled or placed; a sheet interview changed here is the LMS\'s, and the sheet copy leaves it', async () => {
+test('change: mark rescheduled, cancelled, placed or completed; a sheet interview changed here is the LMS\'s, and the sheet copy leaves it', async () => {
   const { item } = (await call('POST', '/lms-interviews', ENTRY)).body;
   const cancelled = await call('PATCH', `/lms-interviews/${item.id}`, { status: 'CANCELLED' });
   assert.equal(cancelled.status, 200);
@@ -147,6 +147,11 @@ test('change: mark rescheduled, cancelled or placed; a sheet interview changed h
   assert.equal(sync.removed, 0, 'an interview added in the LMS is not "no longer in the sheet"');
   const after = await col.findOne({ _id: new mongoose.Types.ObjectId(ravi.id) });
   assert.deepEqual([after.status, after.time, after.inSheet], ['PLACED', '5:00 PM', true]);
+
+  // Completed is the staff's own mark that the interview happened. It is neither
+  // rescheduled nor cancelled, so it still counts as an interview given.
+  const done = await call('PATCH', `/lms-interviews/${item.id}`, { status: 'COMPLETED' });
+  assert.deepEqual([done.body.item.statusKey, done.body.item.cancelled, done.body.item.rescheduled, done.body.item.placed], ['COMPLETED', false, false, false]);
 
   // A change that makes it the same as another interview is refused.
   const twin = await call('PATCH', `/lms-interviews/${item.id}`, { studentName: 'Ravi Kumar', company: 'Alpha Systems', round: 'R-01', date: today });

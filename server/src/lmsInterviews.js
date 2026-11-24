@@ -1,7 +1,7 @@
 // Interviews entered in the LMS (ijfpc_frontend: "Today's Interviews", on the placement page), kept in the LMS
 // database's all_interviews (src/allInterviews.js). Since 11 Nov 2026 that collection is where interviews come
 // from: the staff add each day's interviews there, as they wrote them in the sheet (course, student, time,
-// company, round, room), and mark one rescheduled, cancelled or placed. The HR dashboard's Interviews page reads
+// company, round, room), and mark one rescheduled, cancelled, placed or completed. The HR dashboard's Interviews page reads
 // the same collection (GET /api/interviews), and the sheet is no longer read.
 //
 // An interview from the sheet (the backfill) can be changed in the LMS too; it is then the LMS's (source: 'lms'),
@@ -12,7 +12,7 @@ import { minutesOf, roundGroupOf } from './interviews.js';
 import { connectLms } from './allInterviews.js';
 
 // What the staff can mark an interview as: '' = scheduled (nothing written, as in the sheet).
-export const STATUSES = ['', 'RESCHEDULED', 'CANCELLED', 'PLACED'];
+export const STATUSES = ['', 'RESCHEDULED', 'CANCELLED', 'PLACED', 'COMPLETED'];
 // The courses, in the order of the sheet's blocks (PS, DA, DS, DE).
 export const COURSE_ORDER = ['production-support', 'data-analyst', 'data-science', 'data-engineering'];
 const COURSE_NAMES = new Map(COURSES.map((c) => [c.id, c.name]));
@@ -91,7 +91,7 @@ export function parseInterviewInput(body, { partial = false } = {}) {
   }
   if (!partial || has('status')) {
     const status = clean(input.status);
-    if (!STATUSES.includes(status)) return { error: 'Choose Scheduled, Rescheduled, Cancelled or Placed.' };
+    if (!STATUSES.includes(status)) return { error: 'Choose Scheduled, Rescheduled, Cancelled, Placed or Completed.' };
     value.status = status;
   }
   if (partial && !Object.keys(value).length) return { error: 'Nothing to change.' };
