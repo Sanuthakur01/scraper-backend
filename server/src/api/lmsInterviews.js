@@ -18,6 +18,7 @@ import {
   STATUSES,
 } from '../lmsInterviews.js';
 import { FEEDBACK_CRITERIA, NOTES_LIMIT, RATINGS } from '../interviewFeedback.js';
+import { CONTACT_VIAS, DETAIL_LIMIT } from '../interviewContact.js';
 import { COURSES } from '../config/courses.js';
 import { MIN_QUERY, searchStudents } from '../lmsStudents.js';
 
@@ -81,6 +82,8 @@ router.get('/lms-interviews', can, wrap(async (req, res) => {
     // What an interview is rated on, and how. Sent with the day so the LMS's feedback form and its picture are
     // always the server's list: adding a criterion here does not need the LMS to be changed too.
     feedback: { criteria: FEEDBACK_CRITERIA, ratings: RATINGS, notesLimit: NOTES_LIMIT },
+    // The ways an interview can come in (the page's "Source"), for the same reason: the list lives here.
+    contact: { vias: CONTACT_VIAS, detailLimit: DETAIL_LIMIT },
   });
 }));
 
