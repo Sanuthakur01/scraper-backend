@@ -10,6 +10,7 @@ import mongoose from 'mongoose';
 import { COURSES } from './config/courses.js';
 import { minutesOf, roundGroupOf } from './interviews.js';
 import { connectLms } from './allInterviews.js';
+import { feedbackView, parseFeedback } from './interviewFeedback.js';
 
 // What the staff can mark an interview as: '' = scheduled (nothing written, as in the sheet).
 export const STATUSES = ['', 'RESCHEDULED', 'CANCELLED', 'PLACED', 'COMPLETED'];
@@ -89,6 +90,13 @@ export function parseInterviewInput(body, { partial = false } = {}) {
       value.estimatedDurationMins = mins;
     }
   }
+  // How the interview went, written afterwards (src/interviewFeedback.js). Only ever sent on a change: nobody
+  // can say how an interview went while adding it to the day's list. Blank throughout takes the feedback off.
+  if (has('feedback')) {
+    const parsedFeedback = parseFeedback(input.feedback);
+    if (parsedFeedback.error) return { error: parsedFeedback.error };
+    value.feedback = parsedFeedback.value;
+  }
   if (!partial || has('status')) {
     const status = clean(input.status);
     if (!STATUSES.includes(status)) return { error: 'Choose Scheduled, Rescheduled, Cancelled, Placed or Completed.' };
@@ -115,11 +123,12 @@ const personOf = (person) => ({ userId: person.userId, name: person.name || pers
 // A new interview's document (its key: "lms|<id>", unique like the sheet's; never one of the sheet's keys).
 export function newInterviewDoc(value, person, now = new Date()) {
   const _id = new mongoose.Types.ObjectId();
+  const fields = stamped(value, person, now);
   return {
     _id,
     key: `lms|${_id}`,
-    ...value,
-    ...derived(value),
+    ...fields,
+    ...derived(fields),
     source: 'lms',
     createdBy: personOf(person),
     createdAt: now,
@@ -128,8 +137,16 @@ export function newInterviewDoc(value, person, now = new Date()) {
   };
 }
 
+// Feedback carries who wrote it and when, which the request cannot be trusted for: both are taken from the
+// signed-in staff member here. The rest of the fields are passed through untouched.
+const stamped = (value, person, now) =>
+  value.feedback ? { ...value, feedback: { ...value.feedback, by: personOf(person), at: now } } : value;
+
 // A change's $set: the fields changed, what follows from them, who changed it. The interview is the LMS's from now.
-export const changeSet = (value, person, now = new Date()) => ({ ...value, ...derived(value), source: 'lms', updatedBy: personOf(person), updatedAt: now });
+export const changeSet = (value, person, now = new Date()) => {
+  const fields = stamped(value, person, now);
+  return { ...fields, ...derived(fields), source: 'lms', updatedBy: personOf(person), updatedAt: now };
+};
 
 // The same interview: the same day, student, company and round (as the sheet copy's key).
 export const sameInterview = (a, b) =>
@@ -180,6 +197,8 @@ export function interviewView(doc) {
     placed: Boolean(flags.placed),
     rescheduled: Boolean(flags.rescheduled),
     cancelled: Boolean(flags.cancelled),
+    // How it went, once somebody has written it (null until then): the page only shows feedback where there is some.
+    feedback: feedbackView(doc.feedback),
     source: doc.source === 'lms' ? 'lms' : 'sheet',
     sheet: doc.sheet ? { tab: doc.sheet.tab, row: doc.sheet.row } : null,
     createdBy: doc.createdBy?.name ?? null,

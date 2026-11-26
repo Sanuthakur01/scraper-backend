@@ -17,6 +17,7 @@ import {
   sameInterview,
   STATUSES,
 } from '../lmsInterviews.js';
+import { FEEDBACK_CRITERIA, NOTES_LIMIT, RATINGS } from '../interviewFeedback.js';
 import { COURSES } from '../config/courses.js';
 import { MIN_QUERY, searchStudents } from '../lmsStudents.js';
 
@@ -77,6 +78,9 @@ router.get('/lms-interviews', can, wrap(async (req, res) => {
     items: docs.map(interviewView),
     courses: COURSE_ORDER.map((id) => ({ id, name: COURSES.find((c) => c.id === id)?.name ?? id })),
     statuses: STATUSES,
+    // What an interview is rated on, and how. Sent with the day so the LMS's feedback form and its picture are
+    // always the server's list: adding a criterion here does not need the LMS to be changed too.
+    feedback: { criteria: FEEDBACK_CRITERIA, ratings: RATINGS, notesLimit: NOTES_LIMIT },
   });
 }));
 
