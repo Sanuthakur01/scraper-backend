@@ -10,7 +10,7 @@ import mongoose from 'mongoose';
 import { COURSES } from './config/courses.js';
 import { minutesOf, roundGroupOf } from './interviews.js';
 import { connectLms } from './allInterviews.js';
-import { feedbackView, parseFeedback } from './interviewFeedback.js';
+import { feedbackFields, feedbackView, parseFeedback } from './interviewFeedback.js';
 import { contactView, parseContact } from './interviewContact.js';
 
 // What the staff can mark an interview as: '' = scheduled (nothing written, as in the sheet).
@@ -65,7 +65,7 @@ export function parseInterviewInput(body, { partial = false } = {}) {
   if (value.studentName !== undefined && !value.studentName) return { error: "Write the student's name." };
   // Who the name refers to in the LMS. Named studentClerkId, not clerkId,
   // because createdBy.userId on the same document is the *staff member's*
-  // Clerk id â€” one bare "clerkId" here would be read as the wrong person.
+  // Clerk id — one bare "clerkId" here would be read as the wrong person.
   // Optional: interviews backfilled from the sheet have no student attached,
   // and editing one of those must not demand that someone find them first.
   if (!partial || has('studentClerkId')) {
@@ -91,8 +91,9 @@ export function parseInterviewInput(body, { partial = false } = {}) {
       value.estimatedDurationMins = mins;
     }
   }
-  // How the interview went, written afterwards (src/interviewFeedback.js). Only ever sent on a change: nobody
-  // can say how an interview went while adding it to the day's list. Blank throughout takes the feedback off.
+  // How the interview went, written afterwards (src/interviewFeedback.js) — the same review the trainer
+  // dashboard writes. Only ever sent on a change: nobody can say how an interview went while adding it to the
+  // day's list. Blank throughout takes the review off.
   if (has('feedback')) {
     const parsedFeedback = parseFeedback(input.feedback);
     if (parsedFeedback.error) return { error: parsedFeedback.error };
@@ -146,10 +147,14 @@ export function newInterviewDoc(value, person, now = new Date()) {
   };
 }
 
-// Feedback carries who wrote it and when, which the request cannot be trusted for: both are taken from the
-// signed-in staff member here. The rest of the fields are passed through untouched.
-const stamped = (value, person, now) =>
-  value.feedback ? { ...value, feedback: { ...value.feedback, by: personOf(person), at: now } } : value;
+// A review is not one field but several of the interview's own (src/interviewFeedback.js), so `feedback` in a
+// request becomes those fields here. Who wrote it and when are taken from the signed-in staff member, never
+// from the request. Everything else is passed through untouched.
+const stamped = (value, person, now) => {
+  if (!Object.hasOwn(value, 'feedback')) return value;
+  const { feedback, ...rest } = value;
+  return { ...rest, ...feedbackFields(feedback, personOf(person), now) };
+};
 
 // A change's $set: the fields changed, what follows from them, who changed it. The interview is the LMS's from now.
 export const changeSet = (value, person, now = new Date()) => {
@@ -206,8 +211,10 @@ export function interviewView(doc) {
     placed: Boolean(flags.placed),
     rescheduled: Boolean(flags.rescheduled),
     cancelled: Boolean(flags.cancelled),
-    // How it went, once somebody has written it (null until then): the page only shows feedback where there is some.
-    feedback: feedbackView(doc.feedback),
+    // How it went, once somebody has written it (null until then): the page only shows feedback where there is
+    // some. Read from the interview itself — the review is spread across its own fields, which is how this and
+    // the LMS's trainer dashboard show each other's work.
+    feedback: feedbackView(doc),
     // How the interview came in, as the page's "Source" column. Null on every interview entered before this
     // was asked for, and on any added without one.
     contact: contactView(doc.contact),
