@@ -6,7 +6,8 @@ import { addedJobReason, EXCLUDED_COMPANIES, overExperienceText, underExperience
 import { enabledSources } from '../config/sources.js';
 import { Activity, CollectorRun, ContactOutcome, IncomingCall, Job, NonFilteredJob, STUDENT_COLLATION } from '../models.js';
 import { contactChanges, overallAction } from '../activity.js';
-import { contactKey, parseOutcomeInput, remarkChange, remarkHistory, remarkOf, studentChange } from '../outcomes.js';
+import { contactKey, parseOutcomeInput, remarkChange, remarkHistory, remarkOf, REMARKS, studentChange } from '../outcomes.js';
+import { POINTS } from '../points.js';
 import { requirePermission } from '../auth.js';
 import { HIDDEN_CITIES, SKILL_NAMES, companyKey, phoneKey } from '../normalize.js';
 import { hiringPartners } from '../companies.js';
@@ -1025,10 +1026,68 @@ async function contactRows(range, keep = () => true) {
   };
 }
 
+// The CVs shared in a range, for the Performance report's points (src/points.js: 5 each, to whoever found the
+// number or email): from the activity record, the first time a student's call on a number got the remark
+// "CV shared" (the same call again, or a later remark on it, doesn't count it twice), when that was in the range.
+// Each with who recorded it, whose call it was, and who found the contact: the person who added it to the job
+// (finder: whose points they are; null when it came from the job post, from the same company's earlier job, or
+// from before the record began: nobody's) and when. Newest first.
+async function cvSharedEvents(range) {
+  const label = REMARKS['cv-shared'];
+  const jobIds = await Activity.distinct('job.id', { at: { $gte: range.start, $lt: range.end }, changes: { $elemMatch: { field: 'contactRemark', after: label } } });
+  if (!jobIds.length) return [];
+  // Those jobs' whole record up to the range's end, oldest first: who added each number, then each call's remarks.
+  const history = await Activity.find(
+    { 'job.id': { $in: jobIds }, at: { $lt: range.end }, 'changes.field': { $in: ['contactRemark', ...CONTACT_FIELDS] } },
+    { at: 1, actor: 1, job: 1, changes: 1 },
+  )
+    .sort({ at: 1, _id: 1 })
+    .lean();
+  const contactOf = (jobId, field, value) => `${jobId}|${field}|${contactKey(field, value)}`;
+  const person = (actor) => ({ email: String(actor?.email ?? '').toLowerCase(), name: actor?.name ?? '' });
+  const found = new Map(); // contact -> { at, finder }
+  const counted = new Set(); // the calls (contact + student) with a CV shared already
+  const events = [];
+  for (const entry of history) {
+    for (const change of entry.changes) {
+      if (CONTACT_FIELDS.includes(change.field)) {
+        for (const value of change.added ?? []) {
+          const id = contactOf(entry.job.id, change.field, value);
+          if (found.has(id)) continue;
+          // The same company's other job had it already (known): copied, not found by them.
+          const copied = change.known?.includes(value);
+          found.set(id, { at: entry.at, finder: copied ? null : { ...person(entry.actor), role: entry.actor?.role ?? null } });
+        }
+      } else if (change.field === 'contactRemark' && change.contact && remarkOf(change.after?.[0])?.status === 'cv-shared') {
+        const { field, value } = change.contact;
+        const student = change.contact.student ?? '';
+        const id = contactOf(entry.job.id, field, value);
+        const call = `${id}|${student.toLowerCase()}`;
+        if (counted.has(call)) continue;
+        counted.add(call);
+        if (entry.at < range.start) continue;
+        const { id: jobId, set, title, company, course } = entry.job;
+        events.push({
+          at: entry.at,
+          by: person(entry.actor),
+          student,
+          job: { id: jobId, set, title, company, course },
+          field,
+          value,
+          key: contactKey(field, value),
+          finder: found.get(id)?.finder ?? null,
+          addedAt: found.get(id)?.at ?? null,
+        });
+      }
+    }
+  }
+  return events.sort((a, b) => b.at - a.at);
+}
+
 router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
   const range = activityRange(req.query);
   const keep = req.query.copies === '1' ? undefined : (row) => !row.copied;
-  const [{ rows, truncated }, first] = await Promise.all([contactRows(range, keep), Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean()]);
+  const [{ rows, truncated }, first, cvShared] = await Promise.all([contactRows(range, keep), Activity.findOne({}, { at: 1 }).sort({ at: 1 }).lean(), cvSharedEvents(range)]);
   res.json({
     days: range.days,
     from: range.from,
@@ -1036,6 +1095,8 @@ router.get('/performance', requirePermission('view'), wrap(async (req, res) => {
     since: first?.at ?? null, // when the activity record began: nothing before it can be counted
     rows,
     truncated,
+    cvShared, // the CVs shared in the period, for the points (cvSharedEvents)
+    points: POINTS, // what each activity scores
     students: await knownStudents(), // names to suggest when assigning
   });
 }));

@@ -59,7 +59,7 @@ How the dashboard counts:
 - A period is compared with the same number of days just before only when collection ran on every one of those days.
 - HR details of a job: HR names, HR profile links, phone numbers, emails (typed in by the team, or found in the job post), the students it is assigned to, and notes.
 - Same company: a job from a company we found jobs from on earlier days is tagged "Hiring again"; a job with no HR contact shows the HR saved on another of the company's jobs, and "Use this HR" copies it (the same number may be on several jobs of one company, never on another company's). Copied numbers are not new contacts.
-- Performance report: each HR phone number/email a staff member added (counted once; copied ones from the same company's other job are not counted), and its follow-up: the student it was given to and a remark (${Object.values(REMARKS).join(', ')}). Its days end today.
+- Performance report: each HR phone number/email a staff member added (counted once; copied ones from the same company's other job are not counted), and its follow-up: the student it was given to and a remark (${Object.values(REMARKS).join(', ')}). Its days end today. People are ranked by points (the daily leaderboard too): 1.5 for each phone number found, 1 for each email, 5 for each CV shared on a contact the person found (counted on the day the CV was shared, once per student's call), not by how many contacts they found.
 
 Rules:
 1. Every number, name and fact about the data comes from your tools. Never guess or invent one. If the tools can't answer, say so plainly.

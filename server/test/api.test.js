@@ -1282,6 +1282,81 @@ test("a call keeps every remark: a new one is added and the ones before stay, al
   }
 });
 
+test('the CVs shared, for points: once per call, on the day the CV was shared, credited to whoever found the number', async () => {
+  const now = Date.now();
+  const DAY = 24 * HOUR;
+  const day = (ms) => new Date(ms + 330 * 60_000).toISOString().slice(0, 10);
+  const [job] = await Job.create([
+    {
+      fingerprint: 'points-1', title: 'Points Analyst', company: 'Points Co', course: 'data-analyst', cities: ['Pune'],
+      firstSeenAt: new Date(now - HOUR), lastSeenAt: new Date(now - HOUR), primaryPlatform: 'Naukri', platforms: ['Naukri'], sourceKeys: ['PTS:1'],
+      foundPhones: ['080-4000-1111'],
+    },
+  ]);
+  const put = async (body) => {
+    const res = await fetch(`${base}/outcomes`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer PLACEMENT_STAFF:caller@example.com' }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  };
+  const report = async (query = 'days=1') => (await fetch(`${base}/performance?${query}`)).json();
+  const events = async (query) => (await report(query)).cvShared.filter((e) => String(e.job.id) === String(job._id));
+  const phone = { job: String(job._id), field: 'phone', value: '97222 33344' };
+  const email = { job: String(job._id), field: 'email', value: 'hr@points.in' };
+  try {
+    assert.equal((await putAs(job._id, { ...empty, phone: ['97222 33344'], email: ['hr@points.in'] }, 'RESEARCH_TEAM:finder@example.com')).status, 200);
+    const added = (await Activity.findOne({ 'job.id': job._id }).sort({ at: -1 }).lean()).at;
+    assert.deepEqual(await events(), [], 'no CV shared yet');
+    await put({ ...phone, student: 'Riya Sen', status: 'dnp' });
+    assert.deepEqual(await events(), [], 'DNP is not a CV shared');
+
+    await put({ ...phone, student: 'Riya Sen', status: 'cv-shared' });
+    let list = await events();
+    assert.equal(list.length, 1);
+    const [first] = list;
+    assert.deepEqual(
+      [first.finder.email, first.finder.role, first.by.email, first.student, first.field, first.value, first.key],
+      ['finder@example.com', 'RESEARCH_TEAM', 'caller@example.com', 'Riya Sen', 'phone', '97222 33344', '9722233344'],
+    );
+    assert.equal(Date.parse(first.addedAt), +added, 'when the number was added');
+    assert.ok(Date.parse(first.at) >= +added);
+    // The same call again, or a later remark on it: still that one CV shared, at its first time.
+    await put({ ...phone, student: 'Riya Sen', status: 'cv-shared' });
+    await put({ ...phone, student: 'Riya Sen', status: 'no-openings' });
+    list = await events();
+    assert.deepEqual([list.length, list[0].at], [1, first.at]);
+    // Another student's call on the same number: another CV shared. The email, before anyone had it: student ''.
+    await put({ ...phone, student: 'Dev Patel', status: 'cv-shared' });
+    await put({ ...email, student: '', status: 'cv-shared' });
+    list = await events();
+    assert.deepEqual(list.map((e) => [e.field, e.student]).sort(), [['email', ''], ['phone', 'Dev Patel'], ['phone', 'Riya Sen']]);
+    assert.ok(list.every((e) => e.finder.email === 'finder@example.com'), 'all found by the same person');
+
+    // A number from the job post, or copied from the same company's other job (known): nobody's points.
+    await put({ job: String(job._id), field: 'phone', value: '080-4000-1111', student: 'Riya Sen', status: 'cv-shared' });
+    await Activity.create({
+      at: new Date(), actor: { userId: 'u_copier', email: 'copier@example.com', name: '', role: 'PLACEMENT_STAFF' }, action: 'added',
+      job: { id: job._id, set: 'filtered', title: job.title, company: job.company, course: job.course },
+      changes: [{ field: 'phone', change: 'added', before: [], after: ['98111 00000'], added: ['98111 00000'], removed: [], known: ['98111 00000'] }],
+    });
+    await put({ job: String(job._id), field: 'phone', value: '98111 00000', student: 'Riya Sen', status: 'cv-shared' });
+    list = await events();
+    assert.deepEqual(list.filter((e) => !e.finder).map((e) => [e.value, e.addedAt != null]).sort(), [['080-4000-1111', false], ['98111 00000', true]]);
+
+    // Counted on the day the CV was shared, not the day the number was added: added two days ago, it is not among
+    // today's rows, but its CV shared today is among today's CVs; yesterday has none.
+    await Activity.updateOne({ 'job.id': job._id, 'changes.added': '97222 33344' }, { $set: { at: new Date(now - 2 * DAY) } });
+    const today = await report();
+    assert.ok(!today.rows.some((r) => r.value === '97222 33344'), "added two days ago: not today's row");
+    const riya = today.cvShared.find((e) => e.value === '97222 33344' && e.student === 'Riya Sen');
+    assert.equal(Date.parse(riya.addedAt), now - 2 * DAY);
+    assert.deepEqual(await events(`from=${day(now - DAY)}&to=${day(now - DAY)}`), [], 'yesterday: none');
+    assert.deepEqual(today.points, { phone: 1.5, email: 1, cvShared: 5 }, 'what each activity scores');
+  } finally {
+    await ContactOutcome.deleteMany({ job: job._id });
+    await Activity.deleteMany({ 'job.id': job._id });
+    await Job.deleteOne({ _id: job._id });
+  }
+});
+
 test('saved at the same moment: a student and their remark are both kept; two students both get the number', async () => {
   const job2 = await Job.findOne({ fingerprint: 'f2' }).lean();
   const put = (body) =>

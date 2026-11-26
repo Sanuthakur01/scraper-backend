@@ -11,6 +11,7 @@ import { contactView, findPhoneOwner, FOUND_BY_REQUIRED, HR_SOURCES, parseFollow
 import { ContactOutcome, Job, NonFilteredJob } from '../models.js';
 import { shownCities } from '../normalize.js';
 import { contactKey, parseOutcomeInput, REMARKS, remarkLabel } from '../outcomes.js';
+import { POINTS, pointsOf } from '../points.js';
 import { reveal } from './privacy.js';
 
 // A number with no remark at all, or one of whose students hasn't said how their call went (the report's
@@ -181,7 +182,7 @@ export const TOOLS = [
   tool('get_partners', 'Hiring partners: companies with 2+ openings in the last 90 days, their openings, courses, cities and HR contacts.', { ...VIEW, q: { type: 'string', description: 'Part of a company name.' }, limit: { type: 'integer', description: '1-25, default 10.' } }),
   tool(
     'get_performance',
-    "The performance report: how many HR phone numbers and emails each person added in a period (days end today), on how many jobs, and their follow-up (given to a student, remark). Counts only.",
+    "The performance report: how many HR phone numbers and emails each person added in a period (days end today), on how many jobs, their follow-up (given to a student, remark), the CVs shared on their contacts, and each person's points (1.5 a phone number, 1 an email, 5 a CV shared; the ranking and the daily leaderboard go by points). Counts only.",
     { ...PERIOD, ...COURSE, person: { type: 'string', description: 'Part of a staff name.' } },
   ),
   tool(
@@ -438,14 +439,22 @@ const RUN = {
     const course = courseOf(args.course);
     const person = String(args.person ?? '').toLowerCase();
     const rows = r.rows.filter((row) => (!course || row.job.course === course) && (!person || `${row.actor.name} ${row.actor.email}`.toLowerCase().includes(person)));
+    // The CVs shared in the period on contacts the team found: points for whoever found the contact (src/points.js).
+    const cvShared = (r.cvShared ?? []).filter((e) => e.finder && (!course || e.job.course === course) && (!person || `${e.finder.name} ${e.finder.email}`.toLowerCase().includes(person)));
     const people = new Map();
+    const personOf = (who) => people.get(who.email) ?? { person: who.name || who.email, phones: 0, emails: 0, cvShared: 0, jobs: new Set(), givenToStudent: 0, withRemark: 0 };
     for (const row of rows) {
-      const p = people.get(row.actor.email) ?? { person: row.actor.name || row.actor.email, phones: 0, emails: 0, jobs: new Set(), givenToStudent: 0, withRemark: 0 };
+      const p = personOf(row.actor);
       p[row.field === 'phone' ? 'phones' : 'emails']++;
       p.jobs.add(String(row.job.id));
       if (row.outcomes.some((o) => o.student)) p.givenToStudent++;
       if (row.outcomes.some((o) => o.status)) p.withRemark++;
       people.set(row.actor.email, p);
+    }
+    for (const e of cvShared) {
+      const p = personOf(e.finder);
+      p.cvShared++;
+      people.set(e.finder.email, p);
     }
     const byRemark = {};
     for (const row of rows) for (const o of row.outcomes) if (o.status) byRemark[REMARKS[o.status]] = (byRemark[REMARKS[o.status]] ?? 0) + 1;
@@ -453,7 +462,11 @@ const RUN = {
       period: { from: r.from, to: r.to },
       countingSince: r.since,
       contactDetailsAdded: rows.length,
-      people: [...people.values()].map((p) => ({ ...p, total: p.phones + p.emails, jobs: p.jobs.size })).sort((a, b) => b.total - a.total),
+      cvShared: cvShared.length,
+      points: POINTS, // what each activity scores; people are ranked by points (the daily leaderboard too)
+      people: [...people.values()]
+        .map((p) => ({ ...p, total: p.phones + p.emails, jobs: p.jobs.size, points: pointsOf(p) }))
+        .sort((a, b) => b.points - a.points || b.total - a.total),
       remarks: byRemark,
       withoutRemark: rows.filter((row) => needsRemark(row)).length,
       notGivenToStudent: rows.filter((row) => !row.outcomes.some((o) => o.student)).length,
