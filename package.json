@@ -15,6 +15,7 @@
     "refresh-skills": "npm run refresh-skills -w server --",
     "replay": "npm run replay -w server --",
     "dedupe": "npm run dedupe -w server --",
+    "sync-interviews": "npm run sync-interviews -w server --",
     "demo": "npm run demo -w server --",
     "test": "npm test -w server"
   },
