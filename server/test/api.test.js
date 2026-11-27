@@ -1597,7 +1597,7 @@ test('review board: each number with each student it was given to (or with feedb
   try {
     // A researcher adds two numbers and an email to the job (one number is never given out); its post had a
     // number of its own.
-    assert.equal((await putAs(job._id, { ...empty, phone: ['93000 00001', '93000 00002'], email: ['hr@review.in'], hrName: ['Riya Sharma', 'Anil Kumar'] }, 'RESEARCH_TEAM:finder@example.com')).status, 200);
+    assert.equal((await putAs(job._id, { ...empty, phone: ['93000 00001', '93000 00002'], email: ['hr@review.in'] }, 'RESEARCH_TEAM:finder@example.com')).status, 200);
     // Given out and called today.
     await outcome({ field: 'phone', value: '93000 00001', student: 'Riya' });
     await outcome({ field: 'phone', value: '93000 00001', status: 'cv-shared' });
@@ -1635,8 +1635,6 @@ test('review board: each number with each student it was given to (or with feedb
     assert.deepEqual([a.feedback.status, a.feedback.label, a.feedback.by.email], ['cv-shared', 'CV shared', 'caller2@example.com']);
     assert.ok(a.feedback.hours >= 0 && a.feedback.hours < 0.1, `called right after it was given out: ${a.feedback.hours} h`);
     assert.deepEqual([a.now.student, a.now.status, a.job.course, a.job.company, a.withStudents], ['Riya', 'cv-shared', 'data-analyst', 'Review Co', 2]);
-    assert.equal(a.hrName, 'Riya Sharma / Anil Kumar', "the job's HR names, joined, to copy beside the number");
-    assert.equal(rowOf('90000 11111', 'Neha').hrName, 'Riya Sharma / Anil Kumar', 'a number found in the post gets the job HR name too');
     const sam = rowOf('93000 00001', 'Sam');
     assert.deepEqual([sam.given.student, sam.feedback.status, sam.now.status, sam.contact], ['Sam', 'dnp', 'dnp', a.contact], "the same number, Sam's own call");
     const b = rowOf('hr@review.in', 'Aman');

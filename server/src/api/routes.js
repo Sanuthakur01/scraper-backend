@@ -1135,7 +1135,7 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
       .sort({ at: 1, _id: 1 })
       .lean(),
     ContactOutcome.find({ job: { $in: jobIds } }).lean(),
-    Promise.all([Job, NonFilteredJob].map((model) => model.find({ _id: { $in: jobIds } }, { foundPhones: 1, foundEmails: 1, 'manual.hrNames': 1 }).lean())),
+    Promise.all([Job, NonFilteredJob].map((model) => model.find({ _id: { $in: jobIds } }, { foundPhones: 1, foundEmails: 1 }).lean())),
   ]);
 
   // Each number's story as it happened: who added it, the students it is with, and each student's call (when
@@ -1188,8 +1188,6 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
   const inPost = new Set(
     posts.flat().flatMap((job) => [...(job.foundPhones ?? []).map((v) => contactOf(job._id, 'phone', v)), ...(job.foundEmails ?? []).map((v) => contactOf(job._id, 'email', v))]),
   );
-  // The HR people's names typed into each job, to copy beside its numbers (one value per name; blank ones left out).
-  const hrNamesByJob = new Map(posts.flat().map((job) => [String(job._id), (job.manual?.hrNames ?? []).map((n) => String(n).trim()).filter(Boolean)]));
   const outcomeOf = new Map(outcomes.map((o) => [`${o.job}|${o.field}|${o.key}|${(o.student ?? '').toLowerCase()}`, o]));
   const withStudents = new Map();
   for (const o of outcomes) if (o.student) withStudents.set(`${o.job}|${o.field}|${o.key}`, (withStudents.get(`${o.job}|${o.field}|${o.key}`) ?? 0) + 1);
@@ -1200,7 +1198,6 @@ router.get('/review', requirePermission('view'), wrap(async (req, res) => {
     const base = {
       contact: contact.id,
       job: { id, set, title, company, course },
-      hrName: (hrNamesByJob.get(String(id)) ?? []).join(' / '), // the job's HR name(s), to copy beside the number
       field: contact.field,
       value: contact.value,
       key: contactKey(contact.field, contact.value),
